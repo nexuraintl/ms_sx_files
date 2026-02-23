@@ -98,6 +98,7 @@ async def download_file(audit_id: int, token: str, request: Request):
             raise HTTPException(status_code=404, detail="ID de auditoría inválido.")
 
         # 4. Validación de Seguridad
+        AuthService.validar_permiso_descarga(registro, client_ip)
         await AuthService.check_anti_spam(db, client_ip, registro.recurso, audit_id)
 
         # 5. Localizar archivo en NFS

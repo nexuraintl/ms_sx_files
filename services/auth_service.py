@@ -19,6 +19,24 @@ class AuthService:
         return request.client.host
 
     @staticmethod
+    def validar_permiso_descarga(registro: DescargaAuditoria, ip_cliente: str):
+        """
+        Regla Estricta 1: No permitir si ya fue completada.
+        Regla Estricta 2: No permitir si la IP es diferente a la que originó 
+        el registro (opcional, pero añade seguridad).
+        """
+        # Si el estado ya es COMPLETED, el link queda invalidado
+        if registro.estado == "COMPLETED":
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Este enlace de descarga ya ha sido utilizado y no es válido."
+            )
+        
+        # Si quieres que solo la IP que generó el registro pueda descargarlo:
+        # if registro.ip and registro.ip != ip_cliente:
+        #    raise HTTPException(status_code=403, detail="IP no autorizada para este ID.")
+
+    @staticmethod
     async def check_anti_spam(
         db: AsyncSession, 
         ip: str, 

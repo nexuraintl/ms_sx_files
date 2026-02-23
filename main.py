@@ -70,8 +70,8 @@ async def finalizar_auditoria(audit_id: int, estado: str, bytes_enviados: int, s
         except Exception as e:
             logger.error(f"[{domain}] Error al actualizar auditoría final: {e}")
 
-@app.get("/descargar_archivo/{audit_id}")
-async def download_file(audit_id: int, request: Request):
+@app.get("/download")
+async def download_file(audit_id: int, token: str, request: Request):
     start_time = time.time()
     
     # 1. Obtener Identidad y Configuración

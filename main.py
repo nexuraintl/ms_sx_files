@@ -70,7 +70,7 @@ async def finalizar_auditoria(audit_id: int, estado: str, bytes_enviados: int, s
         except Exception as e:
             logger.error(f"[{domain}] Error al actualizar auditoría final: {e}")
 
-@app.get("/download")
+@app.get("/core/files/download/{audit_id}")
 async def download_file(audit_id: int, token: str, request: Request):
     start_time = time.time()
     

@@ -1,37 +1,57 @@
-import json
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import sessionmaker
-from google.cloud import secretmanager
 from core.config import settings
 
-client = secretmanager.SecretManagerServiceClient()
+# Motor para la base de datos de gestión (Maestra)
+# Se construye usando las variables de entorno definidas en config.py
+url_gestion = (
+    f"mysql+aiomysql://{settings.DB_GESTION_USER}:{settings.DB_GESTION_PASS}@"
+    f"{settings.DB_GESTION_HOST}:{settings.DB_GESTION_PORT}/{settings.DB_GESTION_NAME}"
+)
+engine_gestion = create_async_engine(url_gestion, pool_pre_ping=True)
 
-# Cache para no crear motores de BD en cada petición
+# Cache para motores de BD de clientes
 _engines = {}
 
-def get_config_from_secret():
-    """Trae el JSON maestro de Secret Manager"""
-    name = f"projects/{settings.PROJECT_ID}/secrets/{settings.SECRET_ID}/versions/{settings.SECRET_VERSION}"
-    
-    response = client.access_secret_version(request={"name": name})
-    return json.loads(response.payload.data.decode("UTF-8"))
+async def get_engine_for_client(client_id: str):
+    """
+    Consulta la tabla de gestión y retorna el motor de BD del cliente.
+    """
+    if client_id not in _engines:
+        async with AsyncSession(engine_gestion) as session:
+            # Consulta a la tabla maestra usando los nombres de campos que indicaste
+            query = text("""
+                SELECT nombreBaseDeDatos, usuario, contraseña, hosting, puerto 
+                FROM tn_gestion_bdconex 
+                WHERE idCliente = :c_id LIMIT 1
+            """)
+            result = await session.execute(query, {"c_id": client_id})
+            row = result.fetchone()
+            
+            if not row:
+                return None
+            
+            # Construcción de la URL dinámica para el cliente
+            url_cliente = (
+                f"mysql+aiomysql://{row.usuario}:{row.contraseña}@"
+                f"{row.hosting}:{row.puerto}/{row.nombreBaseDeDatos}"
+            )
+            
+            _engines[client_id] = create_async_engine(
+                url_cliente, pool_size=5, max_overflow=10, pool_recycle=3600
+            )
+            
+    return _engines[client_id]
 
-def get_engine_for_domain(domain: str, config: dict):
-
-    domain_obj = config[domain]
-    """Retorna o crea el motor de base de datos para un dominio específico"""
-    if domain not in _engines:
-        db_cfg = domain_obj.db_config
-        url = f"mysql+aiomysql://{db_cfg.user}:{db_cfg.password}@{db_cfg.host}:{db_cfg.port}/{db_cfg.name}"
+async def get_db_session(client_id: str):
+    """
+    Generador de sesión dinámico.
+    """
+    engine = await get_engine_for_client(client_id)
+    if not engine:
+        raise ValueError(f"Configuración no encontrada para el cliente: {client_id}")
         
-        _engines[domain] = create_async_engine(
-            url, pool_size=5, max_overflow=10, pool_recycle=3600
-        )
-    return _engines[domain]
-
-# Generador de sesión dinámico
-async def get_db_session(domain: str, config: dict):
-    engine = get_engine_for_domain(domain, config)
     async_session = sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
     async with async_session() as session:
         yield session

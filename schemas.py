@@ -9,11 +9,3 @@ class DBConfig(BaseModel):
     name: str
     port: int = 3306
 
-class DomainConfig(BaseModel):
-    db_config: DBConfig
-    nfs_mount_path: str
-
-# El esquema maestro es un diccionario de dominios
-class MasterConfig(BaseModel):
-    # Ejemplo: {"midominio.com": DomainConfig, ...}
-    domains: Dict[str, DomainConfig]

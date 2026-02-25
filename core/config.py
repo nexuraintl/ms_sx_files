@@ -3,10 +3,14 @@ from pydantic_settings import BaseSettings
 from typing import Optional
 
 class Settings(BaseSettings):
-    # Configuración de Google Cloud
-    PROJECT_ID: str = os.getenv("GCP_PROJECT_ID", "tu-proyecto-id")
-    SECRET_ID: str = os.getenv("GCP_SECRET_ID", "MICROSERVICE_CONFIG")
-    SECRET_VERSION: str = "latest"
+
+    # Datos de la DB de Gestión (Maestra)
+    DB_GESTION_HOST: str = os.getenv("DB_GESTION_HOST")
+    DB_GESTION_USER: str = os.getenv("DB_GESTION_USER")
+    DB_GESTION_PASS: str = os.getenv("DB_GESTION_PASS")
+    DB_GESTION_NAME: str = os.getenv("DB_GESTION_NAME", "gestion_clientes")
+    DB_GESTION_PORT: int = int(os.getenv("DB_GESTION_PORT", 3306))
+
 
     # Configuración del Microservicio
     APP_TITLE: str = "NFS Download Microservice"

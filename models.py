@@ -18,4 +18,4 @@ class DescargaAuditoria(Base):
     estado = Column(String(50), default="PENDING")    # Campo 9
     tamano_bytes = Column(BigInteger, default=0)      # Campo 11
     duracion_ms = Column(Integer, default=0)          # Campo 12
-    fecha_actualizacion = Column(DateTime, default=datetime.utcnow, onupdate=datetime.now(timezone.utc))
+    fecha_actualizacion = Column(DateTime, default=datetime.now(timezone.utc), onupdate=datetime.now(timezone.utc))

@@ -75,8 +75,19 @@ async def download_file(audit_id: int, token: str, client_id: str, request: Requ
 
             if not registro:
                 raise HTTPException(status_code=404, detail="ID de auditoría inválido.")
+            
 
             # 4. Validaciones de Seguridad (Permisos y Anti-Spam)
+
+            try:
+                AuthService.validar_token_auditoria(token, registro)
+            except HTTPException as e:
+                await finalizar_auditoria_dinamica(
+                    audit_id, "FAILED", 0, start_time, client_id, e.status_code, engine_cliente
+                )
+                raise e
+           
+
             AuthService.validar_permiso_descarga(registro, client_ip)
             await AuthService.check_anti_spam(db, client_ip, registro.recurso, audit_id)
 

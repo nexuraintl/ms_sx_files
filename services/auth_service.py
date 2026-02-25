@@ -5,6 +5,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from models import DescargaAuditoria
 from core.config import settings
 
+import logging
+
+logger = logging.getLogger("NFS-Service")
+
 class AuthService:
     @staticmethod
     def get_client_ip(request: Request) -> str:
@@ -65,4 +69,22 @@ class AuthService:
             raise HTTPException(
                 status_code=status.HTTP_429_TOO_MANY_REQUESTS,
                 detail="Demasiadas peticiones. Ya existe una descarga en curso para este archivo."
+            )
+    
+    @staticmethod
+    def validar_token_auditoria(token_url: str, registro_auditoria):
+        """
+        Verifica que el token de la URL coincida con el token asignado al registro.
+        """
+        if not registro_auditoria.token:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="El registro de auditoría no tiene un token asignado."
+            )
+            
+        if token_url != registro_auditoria.token:
+            logger.warning(f"Intento de descarga con token inválido para ID {registro_auditoria.id}")
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Token de descarga inválido o expirado."
             )

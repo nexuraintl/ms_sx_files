@@ -8,7 +8,8 @@ class DescargaAuditoria(Base):
     __tablename__ = "tn_descargas_auditoria"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    nombre = Column(String(255))                       # <-- NUEVO: Agregado para el nombre del archivo
+    nombre = Column(String(255))    
+    token = Column(String)                   
     fecha = Column(DateTime, default=datetime.utcnow) 
     ip = Column(String(255))                          
     recurso = Column(String(500))                    

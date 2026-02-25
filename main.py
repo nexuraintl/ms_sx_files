@@ -26,6 +26,7 @@ async def finalizar_auditoria_dinamica(
     bytes_enviados: int, 
     start_time: float, 
     client_id: str, 
+    codigo_http: int,
     engine: AsyncEngine
 ):
     """
@@ -42,6 +43,7 @@ async def finalizar_auditoria_dinamica(
                     estado=estado,
                     duracion_ms=duracion,
                     tamano_bytes=bytes_enviados,
+                    codigo_http=codigo_http,
                     fecha_actualizacion=datetime.now(timezone.utc)
                 )
             )
@@ -55,9 +57,11 @@ async def finalizar_auditoria_dinamica(
 async def download_file(audit_id: int, token: str, client_id: str, request: Request):
     start_time = time.time()
     client_ip = AuthService.get_client_ip(request)
+    # Definimos la ruta base al inicio para evitar errores de NameError
+    nfs_base_path = "/app/media" 
     
     try:
-        # 1. Obtener el motor del cliente (para auditoría posterior)
+        # 1. Obtener el motor del cliente
         engine_cliente = await get_engine_for_client(client_id)
         if not engine_cliente:
             raise HTTPException(status_code=404, detail="Configuración de cliente no encontrada.")
@@ -72,16 +76,18 @@ async def download_file(audit_id: int, token: str, client_id: str, request: Requ
             if not registro:
                 raise HTTPException(status_code=404, detail="ID de auditoría inválido.")
 
-            # 4. Validaciones de Seguridad
-            AuthService.validar_permiso_descarga(registro, client_ip)
+            # 4. Validaciones de Seguridad (Permisos y Anti-Spam)
+            AuthService.validar_permiso_download(registro, client_ip)
             await AuthService.check_anti_spam(db, client_ip, registro.recurso, audit_id)
 
             # 5. Localizar archivo en NFS
-            nfs_base_path = "/app/media" 
             try:
                 full_path = FileService.get_secure_path(nfs_base_path, registro.recurso)
             except HTTPException as e:
-                await finalizar_auditoria_dinamica(audit_id, "FAILED", 0, start_time, client_id, engine_cliente)
+                # Si el archivo no existe o no hay permisos en disco, cerramos auditoría aquí
+                await finalizar_auditoria_dinamica(
+                    audit_id, "FAILED", 0, start_time, client_id, e.status_code, engine_cliente
+                )
                 raise e
 
             # 6. Preparar Metadatos
@@ -90,7 +96,6 @@ async def download_file(audit_id: int, token: str, client_id: str, request: Requ
                 mime_type=registro.mime, 
                 audit_id=audit_id
             )
-        
             content_type = registro.mime if registro.mime else "application/octet-stream"
 
             # 7. Marcar como REDIRECTED (Inicio de descarga)
@@ -107,13 +112,15 @@ async def download_file(audit_id: int, token: str, client_id: str, request: Requ
                         bytes_totales += len(chunk)
                         yield chunk
                     
+                    # ÉXITO: 200 OK
                     await finalizar_auditoria_dinamica(
-                        audit_id, "COMPLETED", bytes_totales, start_time, client_id, engine_cliente
+                        audit_id, "COMPLETED", bytes_totales, start_time, client_id, 200, engine_cliente
                     )
                 except Exception as e:
                     logger.error(f"Error en streaming para auditoría {audit_id}: {e}")
+                    # ERROR DURANTE EL ENVÍO: 500
                     await finalizar_auditoria_dinamica(
-                        audit_id, "FAILED", bytes_totales, start_time, client_id, engine_cliente
+                        audit_id, "FAILED", bytes_totales, start_time, client_id, 500, engine_cliente
                     )
 
             return StreamingResponse(
@@ -124,10 +131,20 @@ async def download_file(audit_id: int, token: str, client_id: str, request: Requ
                     "X-Content-Type-Options": "nosniff"
                 }
             )
-            
-    except ValueError as ve:
-        raise HTTPException(status_code=400, detail=str(ve))
 
+    except HTTPException as he:
+        # Re-lanzamos errores controlados de FastAPI
+        raise he
+    except ValueError as ve:
+        # Error de client_id no encontrado en database.py
+        raise HTTPException(status_code=400, detail=str(ve))
+    except Exception as ge:
+        logger.error(f"Error inesperado: {ge}")
+        # Si ya teníamos el motor, intentamos cerrar la auditoría como error 500
+        if 'engine_cliente' in locals() and 'audit_id' in locals():
+            await finalizar_auditoria_dinamica(audit_id, "ERROR", 0, start_time, client_id, 500, engine_cliente)
+        raise HTTPException(status_code=500, detail="Error interno del servidor")
+    
 @app.get("/health")
 async def health_check():
     return {

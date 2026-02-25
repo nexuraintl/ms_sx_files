@@ -16,7 +16,8 @@ class DescargaAuditoria(Base):
     usuario_id = Column(Integer, nullable=True)       
     origen = Column(String(50), nullable=False)       
     user_agent = Column(String(350), nullable=True)   
-    estado = Column(String(50), default="PENDING")    
+    estado = Column(String(50), default="PENDING")  
+    codigo_http = Column(Integer, nullable=True)  
     tamano_bytes = Column(BigInteger, default=0)      
     duracion_ms = Column(Integer, default=0)          
     fecha_actualizacion = Column(DateTime, 

@@ -154,6 +154,8 @@ async def download_file(audit_id: int, token: str, client_id: str, request: Requ
                     "Content-Disposition": f'attachment; filename="{friendly_name}"',
                     "Content-Length": str(file_size),  # CRÍTICO: Evita el Error 500 por Chunked encoding
                     "X-Content-Type-Options": "nosniff",
+                    "X-Accel-Buffering": "no",
+                    "Cache-Control": "no-cache",
                     "Accept-Ranges": "bytes"           # Permite reanudar descargas si el cliente lo soporta
                 }
             )

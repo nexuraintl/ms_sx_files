@@ -31,6 +31,7 @@ async def finalizar_auditoria_dinamica(
     codigo_http: int,
     engine: AsyncEngine
 ):
+    logger.info(f"Intentando actualizar DB para auditoria {audit_id} a estado {estado}...")
     """
     Actualiza el resultado final en la base de datos del cliente.
     """
@@ -122,35 +123,32 @@ async def download_file(audit_id: int, token: str, client_id: str, request: Requ
             async def stream_wrapper():
                 bytes_sent = 0
                 try:
-                    # Usamos el iterador de archivos definido en FileService
+                    # Usamos el iterador de archivos
                     async for chunk in FileService.file_iterator(full_path):
-                        # 1. Verificación proactiva: si el usuario cancela, dejamos de leer el NFS
                         if await request.is_disconnected():
-                            raise ClientDisconnect("El cliente cerró la conexión")
+                            # Si se desconecta, lanzamos error para ir al except
+                            raise ClientDisconnect("Cliente desconectado")
                         
                         yield chunk
                         bytes_sent += len(chunk)
+
+                    # --- EL TRUCO ESTÁ AQUÍ ---
+                    # Si llegamos aquí, el archivo se leyó completo.
+                    # Actualizamos la DB antes de que el generador muera.
+                    logger.info(f"Archivo enviado completamente. Actualizando ID {audit_id}")
                     
-                    # 2. ÉXITO TOTAL: Si llegamos aquí, el bucle terminó sin excepciones.
-                    # Ejecutamos la actualización ANTES de que el generador se cierre.
-                    logger.info(f"Lectura completa para auditoría {audit_id}. Enviando actualización a COMPLETED.")
-                    
+                    # Lo ejecutamos sin background_task aquí para asegurar orden
                     await finalizar_auditoria_dinamica(
-                        audit_id=audit_id,
-                        estado="COMPLETED",
-                        bytes_enviados=bytes_sent,
-                        start_time=start_time,
-                        client_id=client_id,
-                        codigo_http=200,
-                        engine=engine_cliente
+                        audit_id, "COMPLETED", bytes_sent, start_time, client_id, 200, engine_cliente
                     )
 
-                except ClientDisconnect:
-                    # Caso: El usuario canceló la descarga manualmente
-                    logger.warning(f"Descarga cancelada por el usuario (Audit: {audit_id}).")
+                except (ClientDisconnect, Exception) as e:
+                    logger.warning(f"Cierre prematuro o error en {audit_id}: {e}")
+                    # En caso de error, intentamos marcar como FAILED
                     await finalizar_auditoria_dinamica(
                         audit_id, "FAILED", bytes_sent, start_time, client_id, 499, engine_cliente
                     )
+                    
                 except Exception as e:
                     # Caso: Error inesperado durante el streaming (ej. error de red o disco)
                     logger.error(f"Error crítico en streaming (Audit: {audit_id}): {str(e)}")

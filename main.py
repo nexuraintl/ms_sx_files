@@ -3,7 +3,7 @@ import logging
 import os
 from datetime import datetime, timezone
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, BackgroundTasks
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession, AsyncEngine
 from sqlalchemy import select, update
@@ -16,7 +16,6 @@ from services.auth_service import AuthService
 from database import get_db_session, get_engine_for_client, _engines
 from core.config import settings
 
-# Configuración de Logging
 logging.basicConfig(level=settings.LOG_LEVEL)
 logger = logging.getLogger("NFS-Service")
 
@@ -31,11 +30,11 @@ async def finalizar_auditoria_dinamica(
     codigo_http: int,
     engine: AsyncEngine
 ):
-    logger.info(f"Intentando actualizar DB para auditoria {audit_id} a estado {estado}...")
     """
     Actualiza el resultado final en la base de datos del cliente.
     """
     duracion = (time.time() - start_time) * 1000
+    logger.info(f"Background Task: Iniciando actualización ID {audit_id} a {estado}")
     
     async with AsyncSession(engine) as session:
         try:
@@ -52,142 +51,109 @@ async def finalizar_auditoria_dinamica(
             )
             await session.execute(stmt)
             await session.commit()
-            logger.info(f"[Cliente: {client_id}] Auditoría {audit_id} cerrada como {estado}.")
+            logger.info(f"[Cliente: {client_id}] Auditoría {audit_id} cerrada como {estado} con {bytes_enviados} bytes.")
         except Exception as e:
-            logger.error(f"[Cliente: {client_id}] Error al actualizar auditoría final: {e}")
+            logger.error(f"[Cliente: {client_id}] Error en finalizar_auditoria_dinamica: {e}")
 
 @app.get("/core/files/download/{audit_id}")
-async def download_file(audit_id: int, token: str, client_id: str, request: Request):
+async def download_file(
+    audit_id: int, 
+    token: str, 
+    client_id: str, 
+    request: Request,
+    background_tasks: BackgroundTasks # Añadido BackgroundTasks
+):
     start_time = time.time()
     client_ip = AuthService.get_client_ip(request)
-    # Definimos la ruta base al inicio para evitar errores de NameError
     nfs_base_path = "/app/media" 
     
+    # Variables de estado para el stream
+    full_path = None
+    friendly_name = None
+    content_type = None
+    file_size = 0
+    engine_cliente = None
+
     try:
-        # 1. Obtener el motor del cliente
         engine_cliente = await get_engine_for_client(client_id)
         if not engine_cliente:
             raise HTTPException(status_code=404, detail="Configuración de cliente no encontrada.")
 
-        # 2. Conexión dinámica a la BD del cliente
+        # FASE 1: Operaciones de Base de Datos iniciales
+        # Usamos el iterador pero salimos rápido para LIBERAR la conexión
         async for db in get_db_session(client_id):
-            
-            # 3. Buscar registro de auditoría
             result = await db.execute(select(DescargaAuditoria).where(DescargaAuditoria.id == audit_id))
             registro = result.scalars().first()
 
             if not registro:
                 raise HTTPException(status_code=404, detail="ID de auditoría inválido.")
             
-
-            # 4. Validaciones de Seguridad (Permisos y Anti-Spam)
-
+            # Validaciones
             try:
                 AuthService.validar_token_auditoria(token, registro)
             except HTTPException as e:
-                await finalizar_auditoria_dinamica(
-                    audit_id, "FAILED", 0, start_time, client_id, e.status_code, engine_cliente
-                )
+                background_tasks.add_task(finalizar_auditoria_dinamica, audit_id, "FAILED", 0, start_time, client_id, e.status_code, engine_cliente)
                 raise e
-           
 
             AuthService.validar_permiso_descarga(registro, client_ip)
             await AuthService.check_anti_spam(db, client_ip, registro.recurso, audit_id)
 
-            # 5. Localizar archivo en NFS
-            try:
-                full_path = FileService.get_secure_path(nfs_base_path, registro.recurso)
-            except HTTPException as e:
-                # Si el archivo no existe o no hay permisos en disco, cerramos auditoría aquí
-                await finalizar_auditoria_dinamica(
-                    audit_id, "FAILED", 0, start_time, client_id, e.status_code, engine_cliente
-                )
-                raise e
-
-            # 6. Preparar Metadatos
-            friendly_name = FileService.generate_friendly_filename(
-                nombre_db=registro.nombre, 
-                mime_type=registro.mime, 
-                audit_id=audit_id
-            )
+            # Preparar metadatos del archivo
+            full_path = FileService.get_secure_path(nfs_base_path, registro.recurso)
+            file_size = os.path.getsize(full_path)
+            friendly_name = FileService.generate_friendly_filename(registro.nombre, registro.mime, audit_id)
             content_type = registro.mime if registro.mime else "application/octet-stream"
 
-            # 7. Marcar como REDIRECTED (Inicio de descarga)
+            # Marcar como REDIRECTED y COMMIT INMEDIATO para liberar el lock de la fila
             registro.estado = "REDIRECTED"
             registro.ip = client_ip
             registro.fecha_actualizacion = datetime.now(timezone.utc)
             await db.commit()
+            break # SALIMOS DEL LOOP: Cerramos la sesión 'db' antes de enviar el archivo
 
-            file_size = os.path.getsize(full_path) 
-            # 8. Streaming wrapper
-            async def stream_wrapper():
-                bytes_sent = 0
-                try:
-                    # Usamos el iterador de archivos
-                    async for chunk in FileService.file_iterator(full_path):
-                        if await request.is_disconnected():
-                            # Si se desconecta, lanzamos error para ir al except
-                            raise ClientDisconnect("Cliente desconectado")
-                        
-                        yield chunk
-                        bytes_sent += len(chunk)
+        # FASE 2: Streaming Wrapper
+        async def stream_wrapper():
+            bytes_sent = 0
+            success = False
+            try:
+                async for chunk in FileService.file_iterator(full_path):
+                    if await request.is_disconnected():
+                        raise ClientDisconnect("Cliente desconectado")
+                    yield chunk
+                    bytes_sent += len(chunk)
+                
+                success = True # El bucle terminó, el archivo se leyó todo
+            except Exception as e:
+                logger.warning(f"Error o desconexión en stream {audit_id}: {e}")
+            finally:
+                # FASE 3: Delegar la actualización a BackgroundTasks
+                # Esto se ejecuta incluso si el generador es cancelado
+                estado_final = "COMPLETED" if success else "FAILED"
+                codigo_http = 200 if success else 499
+                
+                # Usar background_tasks asegura que la actualización ocurra fuera del ciclo de vida del stream
+                background_tasks.add_task(
+                    finalizar_auditoria_dinamica,
+                    audit_id, estado_final, bytes_sent, start_time, client_id, codigo_http, engine_cliente
+                )
 
-                    # --- EL TRUCO ESTÁ AQUÍ ---
-                    # Si llegamos aquí, el archivo se leyó completo.
-                    # Actualizamos la DB antes de que el generador muera.
-                    logger.info(f"Archivo enviado completamente. Actualizando ID {audit_id}")
-                    
-                    # Lo ejecutamos sin background_task aquí para asegurar orden
-                    await finalizar_auditoria_dinamica(
-                        audit_id, "COMPLETED", bytes_sent, start_time, client_id, 200, engine_cliente
-                    )
-
-                except (ClientDisconnect, Exception) as e:
-                    logger.warning(f"Cierre prematuro o error en {audit_id}: {e}")
-                    # En caso de error, intentamos marcar como FAILED
-                    await finalizar_auditoria_dinamica(
-                        audit_id, "FAILED", bytes_sent, start_time, client_id, 499, engine_cliente
-                    )
-                    
-                except Exception as e:
-                    # Caso: Error inesperado durante el streaming (ej. error de red o disco)
-                    logger.error(f"Error crítico en streaming (Audit: {audit_id}): {str(e)}")
-                    await finalizar_auditoria_dinamica(
-                        audit_id, "FAILED", bytes_sent, start_time, client_id, 500, engine_cliente
-                    )
-
-            # 9. Retorno de la respuesta con Headers de rendimiento
-            return StreamingResponse(
-                stream_wrapper(),
-                media_type=content_type,
-                headers={
-                    "Content-Disposition": f'attachment; filename="{friendly_name}"',
-                    "Content-Length": str(file_size),  # Permite al navegador mostrar progreso real
-                    "X-Accel-Buffering": "no",        # Desactiva el buffering de Google Cloud (VITAL)
-                    "Cache-Control": "no-cache",      # Evita problemas de caché en el proxy
-                    "Accept-Ranges": "bytes",         # Facilita la descarga de archivos grandes
-                    "X-Content-Type-Options": "nosniff"
-                }
-            )
-        
+        return StreamingResponse(
+            stream_wrapper(),
+            media_type=content_type,
+            headers={
+                "Content-Disposition": f'attachment; filename="{friendly_name}"',
+                "Content-Length": str(file_size),
+                "X-Accel-Buffering": "no",
+                "Cache-Control": "no-cache",
+                "Accept-Ranges": "bytes",
+                "X-Content-Type-Options": "nosniff"
+            }
+        )
         
     except HTTPException as he:
-        # Re-lanzamos errores controlados de FastAPI
         raise he
-    except ValueError as ve:
-        # Error de client_id no encontrado en database.py
-        raise HTTPException(status_code=400, detail=str(ve))
     except Exception as ge:
         logger.error(f"Error inesperado: {ge}")
-        # Si ya teníamos el motor, intentamos cerrar la auditoría como error 500
-        if 'engine_cliente' in locals() and 'audit_id' in locals():
-            await finalizar_auditoria_dinamica(audit_id, "ERROR", 0, start_time, client_id, 500, engine_cliente)
+        if engine_cliente:
+            background_tasks.add_task(finalizar_auditoria_dinamica, audit_id, "ERROR", 0, start_time, client_id, 500, engine_cliente)
         raise HTTPException(status_code=500, detail="Error interno del servidor")
-    
-@app.get("/health")
-async def health_check():
-    return {
-        "status": "alive", 
-        "clients_active": list(_engines.keys()),
-        "total_active_connections": len(_engines)
-    }

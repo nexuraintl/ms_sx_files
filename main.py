@@ -117,7 +117,7 @@ async def download_file(audit_id: int, token: str, client_id: str, request: Requ
             registro.fecha_actualizacion = datetime.now(timezone.utc)
             await db.commit()
 
-            file_size = os.path.getsize(full_path)
+            file_size = os.path.getsize(full_path) 
             # 8. Streaming wrapper
             async def stream_wrapper():
                 bytes_sent = 0

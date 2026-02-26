@@ -128,10 +128,10 @@ async def download_file(audit_id: int, token: str, client_id: str, request: Requ
                         audit_id, "COMPLETED", bytes_totales, start_time, client_id, 200, engine_cliente
                     )
                 except Exception as e:
-                    logger.error(f"Error en streaming para auditoría {audit_id}: {e}")
+                    logger.error(f"Descarga interrumpida o error en streaming: {e}")
                     # ERROR DURANTE EL ENVÍO: 500
                     await finalizar_auditoria_dinamica(
-                        audit_id, "FAILED", bytes_totales, start_time, client_id, 500, engine_cliente
+                        audit_id, "FAILED", bytes_totales, start_time, client_id, 499, engine_cliente
                     )
 
             return StreamingResponse(

@@ -1,11 +1,13 @@
 import time
 import logging
+import os
 from datetime import datetime, timezone
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession, AsyncEngine
 from sqlalchemy import select, update
+from starlette.requests import ClientDisconnect
 
 # Importaciones locales
 from models import DescargaAuditoria
@@ -115,23 +117,34 @@ async def download_file(audit_id: int, token: str, client_id: str, request: Requ
             registro.fecha_actualizacion = datetime.now(timezone.utc)
             await db.commit()
 
+            file_size = os.path.getsize(full_path)
             # 8. Streaming wrapper
             async def stream_wrapper():
-                bytes_totales = 0
+                bytes_sent = 0
+                completed_successfully = False
                 try:
                     async for chunk in FileService.file_iterator(full_path):
-                        bytes_totales += len(chunk)
+                        # Verificación proactiva de desconexión
+                        if await request.is_disconnected():
+                            raise ClientDisconnect("El cliente cerró la conexión")
+                        
                         yield chunk
+                        bytes_sent += len(chunk)
                     
-                    # ÉXITO: 200 OK
+                    # Si el bucle termina, la lectura del archivo fue total
+                    completed_successfully = True
+                
+                except (ClientDisconnect, Exception) as e:
+                    logger.warning(f"Streaming interrumpido (Audit: {audit_id}): {str(e)}")
+                    # Actualizamos como FAILED/499 (Client Closed Request)
                     await finalizar_auditoria_dinamica(
-                        audit_id, "COMPLETED", bytes_totales, start_time, client_id, 200, engine_cliente
+                        audit_id, "FAILED", bytes_sent, start_time, client_id, 499, engine_cliente
                     )
-                except Exception as e:
-                    logger.error(f"Descarga interrumpida o error en streaming: {e}")
-                    # ERROR DURANTE EL ENVÍO: 500
+                
+                if completed_successfully:
+                    # Solo marcamos COMPLETED si llegamos al final del archivo
                     await finalizar_auditoria_dinamica(
-                        audit_id, "FAILED", bytes_totales, start_time, client_id, 499, engine_cliente
+                        audit_id, "COMPLETED", bytes_sent, start_time, client_id, 200, engine_cliente
                     )
 
             return StreamingResponse(
@@ -139,7 +152,9 @@ async def download_file(audit_id: int, token: str, client_id: str, request: Requ
                 media_type=content_type,
                 headers={
                     "Content-Disposition": f'attachment; filename="{friendly_name}"',
-                    "X-Content-Type-Options": "nosniff"
+                    "Content-Length": str(file_size),  # CRÍTICO: Evita el Error 500 por Chunked encoding
+                    "X-Content-Type-Options": "nosniff",
+                    "Accept-Ranges": "bytes"           # Permite reanudar descargas si el cliente lo soporta
                 }
             )
 

@@ -60,6 +60,14 @@ class FileService:
 
             if extension == ".jpe": extension = ".jpg"
 
+            # Si mimetypes no lo conoce, intentamos extraerla del nombre original en la DB
+            if not extension and nombre_db and "." in nombre_db:
+                extension = os.path.splitext(nombre_db)[1].lower()
+        
+            # Si aún así no hay nada, usamos .bin por seguridad
+            if not extension:
+                extension = ".bin"
+
         # 2. Limpiar el nombre que viene de la BD (quitar caracteres no permitidos en archivos)
         # Si no hay nombre, usamos un fallback
         base_name = nombre_db if nombre_db else f"archivo_{audit_id}"

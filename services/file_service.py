@@ -42,43 +42,61 @@ class FileService:
     @staticmethod
     def generate_friendly_filename(nombre_db: str, mime_type: str, audit_id: int) -> str:
         """
-        Usa el nombre de la BD, limpia caracteres extraños y asegura la extensión correcta.
+        Genera un nombre de archivo seguro, manejando extensiones conflictivas y 
+        caracteres que rompen las cabeceras HTTP.
         """
-        # 1. Determinar extensión
-        extension = ".bin"
-        if mime_type:
-            mime_type = mime_type.strip().lower()
-            extension = mimetypes.guess_extension(mime_type) or ".bin"
-            
-            # Ajustes manuales
-            if not extension or extension == ".bin":
-                if 'zip' in mime_type: extension = '.zip'
-                elif 'pdf' in mime_type: extension = '.pdf'
-                elif 'word' in mime_type: extension = '.docx'
-                elif 'excel' in mime_type or 'spreadsheet' in mime_type: extension = '.xlsx'
-                
-
-            if extension == ".jpe": extension = ".jpg"
-
-            # Si mimetypes no lo conoce, intentamos extraerla del nombre original en la DB
-            if not extension and nombre_db and "." in nombre_db:
-                extension = os.path.splitext(nombre_db)[1].lower()
+        # 1. Determinar la extensión con máxima prioridad
+        extension = None
         
-            # Si aún así no hay nada, usamos .bin por seguridad
-            if not extension:
-                extension = ".bin"
+        # Intento A: Por MIME type
+        if mime_type:
+            m_type = mime_type.strip().lower()
+            extension = mimetypes.guess_extension(m_type)
+            
+            # Ajustes manuales para tipos comunes que mimetypes suele fallar
+            if not extension or extension == ".bin":
+                if 'pdf' in m_type: extension = '.pdf'
+                elif 'word' in m_type or 'officedocument.word' in m_type: extension = '.docx'
+                elif 'excel' in m_type or 'spreadsheet' in m_type: extension = '.xlsx'
+                elif 'zip' in m_type: extension = '.zip'
+                elif 'rar' in m_type: extension = '.rar'
+                elif '7z' in m_type: extension = '.7z'
+                elif 'jpeg' in m_type or 'jpg' in m_type: extension = '.jpg'
 
-        # 2. Limpiar el nombre que viene de la BD (quitar caracteres no permitidos en archivos)
-        # Si no hay nombre, usamos un fallback
+        # Intento B: Si el MIME falló, extraerla del nombre original en la DB
+        if (not extension or extension == ".bin") and nombre_db and "." in nombre_db:
+            ext_extraida = os.path.splitext(nombre_db)[1].lower()
+            if len(ext_extraida) > 1: # Aseguramos que no sea solo un punto
+                extension = ext_extraida
+
+        # Fallback final
+        if not extension:
+            extension = ".bin"
+        
+        # Normalización de extensiones raras
+        if extension == ".jpe": extension = ".jpg"
+
+        # 2. Limpiar el cuerpo del nombre (Base Name)
         base_name = nombre_db if nombre_db else f"archivo_{audit_id}"
         
-        # Eliminar cualquier cosa que no sea letras, números, puntos o guiones
-        base_name = re.sub(r'[,;\"\\/]', '', base_name)
-        # Limpiar espacios múltiples y asegurar que no sea demasiado largo
-        base_name = " ".join(base_name.split())[:150]               
-
-        # 3. Retornar nombre final (asegurando que no se repita la extensión si el nombre ya la trae)
+        # Quitamos la extensión del nombre base si ya la trae (para evitar archivo.pdf.pdf)
         if base_name.lower().endswith(extension.lower()):
-            return base_name
-            
+            base_name = base_name[: -len(extension)]
+
+        # LIMPIEZA DE CARACTERES CRÍTICOS
+        # Eliminamos: , ; " \ / (rompen headers) y [ ] { } < > (conflictos de SO)
+        # Mantenemos: letras, números, puntos internos, guiones y espacios.
+        base_name = re.sub(r'[,;\"\\\/\[\]{}<>]', '', base_name)
+        
+        # IMPORTANTE: Quitamos puntos al final del nombre base para no confundir al navegador
+        # Esto corrige el caso "2.4.3.2..pdf" -> "2.4.3.2.pdf"
+        base_name = base_name.strip().rstrip('.')
+
+        # Limpiar espacios múltiples y limitar longitud para estabilidad de cabeceras
+        base_name = " ".join(base_name.split())[:150]
+        
+        if not base_name:
+            base_name = f"archivo_{audit_id}"
+
+        # 3. Retornar la unión perfecta
         return f"{base_name}{extension}"

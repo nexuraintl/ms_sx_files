@@ -150,7 +150,7 @@ async def download_file(
             headers={
                 # 3. 'attachment' fuerza la descarga. filename* asegura compatibilidad UTF-8
                 "Content-Disposition": f"attachment; filename*=UTF-8''{friendly_name_encoded}",
-                "Content-Length": str(file_size),
+                #"Content-Length": str(file_size),
                 "X-Accel-Buffering": "no",
                 # 4. Prohibimos al navegador "adivinar" el contenido
                 "X-Content-Type-Options": "nosniff", 

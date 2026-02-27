@@ -103,23 +103,23 @@ async def download_file(
         async def stream_wrapper():
             bytes_sent = 0
             success = False
-            last_log_checkpoint = 0
-            chunk_count = 0
+            #last_log_checkpoint = 0
+            #chunk_count = 0
             try:
                 logger.info(f"🚀 Iniciando stream para ID {audit_id}. Tamaño total: {file_size} bytes")
 
                 async for chunk in FileService.file_iterator(full_path):
-                    chunk_count += 1
+                    #chunk_count += 1
                     if await request.is_disconnected():
-                        logger.warning(f"❌ Cliente desconectado prematuramente en byte {bytes_sent}")
+                        #logger.warning(f"❌ Cliente desconectado prematuramente en byte {bytes_sent}")
                         raise ClientDisconnect("Cliente desconectado")
                     yield chunk
                     bytes_sent += len(chunk)
 
                     # Loguear cada 5MB para no saturar los logs pero tener rastro
-                    if bytes_sent - last_log_checkpoint > 5 * 1024 * 1024:
-                        logger.info(f"📥 Progreso ID {audit_id}: {bytes_sent}/{file_size} bytes sent...")
-                        last_log_checkpoint = bytes_sent
+                    #if bytes_sent - last_log_checkpoint > 5 * 1024 * 1024:
+                        #logger.info(f"📥 Progreso ID {audit_id}: {bytes_sent}/{file_size} bytes sent...")
+                        #last_log_checkpoint = bytes_sent
                 
                 if bytes_sent >= file_size:
                     success = True 

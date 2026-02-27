@@ -40,4 +40,4 @@ EXPOSE 8080
 
 # Comando de inicio usando Uvicorn con workers gestionados para producción
 # --proxy-headers es vital porque estás detrás de un Load Balancer
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080", "--proxy-headers", "--forwarded-allow-ips=*", "--timeout-keep-alive", "65", "--limit-max-requests", "1000"]
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080", "--proxy-headers", "--forwarded-allow-ips=*", "--timeout-keep-alive", "65", "--limit-max-requests", "1000", "--log-level", "info"]

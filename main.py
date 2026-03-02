@@ -180,7 +180,7 @@ async def download_file(
             media_type="application/octet-stream", 
             headers={
                 # 3. 'attachment' fuerza la descarga. filename* asegura compatibilidad UTF-8
-                "Content-Disposition": f'attachment; ffilename="{friendly_name_ascii}"; ilename*=UTF-8\'\'{friendly_name_encoded}',
+                "Content-Disposition": f'attachment; filename="{friendly_name_ascii}"; filename*=UTF-8\'\'{friendly_name_encoded}',
                 #"Content-Length": str(file_size),
                 "X-Accel-Buffering": "no",
                 # 4. Prohibimos al navegador "adivinar" el contenido
@@ -188,8 +188,7 @@ async def download_file(
                 "Cache-Control": "no-cache, no-store, must-revalidate",
                 "Pragma": "no-cache",
                 "Expires": "0",
-                "Accept-Ranges": "bytes",
-                "X-File-Size": str(file_size)
+                "Accept-Ranges": "bytes"
             }
         )
         

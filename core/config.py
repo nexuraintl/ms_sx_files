@@ -24,7 +24,7 @@ class Settings(BaseSettings):
     
     # Parámetros de Performance
     # 1MB por chunk es ideal para no saturar la RAM en descargas grandes
-    CHUNK_SIZE: int = 256 * 1024 #256KB
+    CHUNK_SIZE: int = 64 * 1024 #256KB
     
     # Seguridad
     # Tiempo en segundos para el bloqueo anti-spam

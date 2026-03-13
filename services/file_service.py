@@ -32,12 +32,16 @@ class FileService:
 
     @staticmethod
     async def file_iterator(file_path: str):
+        # Recomendación: CHUNK_SIZE = 64 * 1024 (64KB) en settings
         async with aiofiles.open(file_path, mode="rb") as f:
             while True:
                 chunk = await f.read(settings.CHUNK_SIZE)
-                if not chunk: break
+                if not chunk: 
+                    break
                 yield chunk
-                await asyncio.sleep(0)
+                # Un sleep de 1ms (0.001) es la diferencia entre colapsar el 
+                # Gateway o mantener un flujo constante y saludable.
+                await asyncio.sleep(0.001)
 
     @staticmethod
     def generate_friendly_filename(nombre_db: str, mime_type: str, audit_id: int) -> str:

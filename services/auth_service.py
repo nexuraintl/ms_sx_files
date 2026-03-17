@@ -4,12 +4,59 @@ from sqlalchemy import select, and_, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from models import DescargaAuditoria
 from core.config import settings
+from google.oauth2 import id_token
+from google.auth.transport import requests as google_requests
 
 import logging
 
 logger = logging.getLogger("NFS-Service")
 
 class AuthService:
+
+    _request_adapter = google_requests.Request()
+
+    @staticmethod
+    def validar_access_token_google(token: str, client_id: str):
+        """
+        Valida criptográficamente un Google ID Token (Access Token).
+        Verifica: Firma, Emisor (Google), Expiración y Audiencia.
+        """
+        try:
+            # El campo 'aud' en tu JSON es el Client ID de la App de Google
+            # Lo validamos para asegurar que el token fue emitido para tu proyecto
+            expected_audience = "618104708054-9r9s1c4alg36erliucho9t52n32n6dgq.apps.googleusercontent.com"
+            
+            # verify_oauth2_token hace todo el trabajo pesado:
+            # 1. Descarga certs de https://www.googleapis.com/oauth2/v3/certs
+            # 2. Verifica firma RS256 con el 'kid' del header
+            # 3. Verifica 'exp' (expiración) e 'iss' (accounts.google.com)
+            id_info = id_token.verify_oauth2_token(
+                token, 
+                AuthService._request_adapter, 
+                expected_audience
+            )
+
+            # Validación lógica adicional: El client_id de la URL 
+            # podrías compararlo con algún claim interno si fuera necesario.
+            # Por ahora, si llegamos aquí, el token es LEGÍTIMO de Google.
+            
+            logger.info(f"🔐 Token verificado exitosamente para sub: {id_info['sub']}")
+            return id_info
+
+        except ValueError as e:
+            # Este error ocurre si la firma es falsa, el token expiró o la aud no coincide
+            logger.error(f"❌ Fallo de seguridad en JWT: {str(e)}")
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Acceso denegado: Token de seguridad inválido o expirado."
+            )
+        except Exception as e:
+            logger.error(f"🔥 Error inesperado validando identidad: {str(e)}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Error al validar la identidad del solicitante."
+            )
+
     @staticmethod
     def get_client_ip(request: Request) -> str:
         """

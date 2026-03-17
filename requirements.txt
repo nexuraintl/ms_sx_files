@@ -9,3 +9,5 @@ cryptography==42.0.2
 pydantic>=2.0.0
 pydantic-settings>=2.1.0  # Necesario a veces para conexiones SSL seguras a MySQL
 greenlet==3.0.3
+google-auth==2.23.0
+requests==2.31.0

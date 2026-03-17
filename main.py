@@ -90,6 +90,7 @@ async def download_file(
     background_tasks: BackgroundTasks
 ):
     start_time = time.time()
+    AuthService.validar_access_token_google(token, client_id)
     client_ip = AuthService.get_client_ip(request)
     nfs_base_path = "/app/media" 
     

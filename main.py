@@ -1,24 +1,42 @@
 import time
 import logging
+import os
 from datetime import datetime, timezone
+from urllib.parse import quote  # Necesario para codificar el nombre del archivo
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, BackgroundTasks
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession, AsyncEngine
-from sqlalchemy import select, update
+from sqlalchemy import select, update, text
+from starlette.requests import ClientDisconnect
 
 # Importaciones locales
 from models import DescargaAuditoria
 from services.file_service import FileService
 from services.auth_service import AuthService
-from database import get_db_session, get_engine_for_client, _engines
+from database import get_db_session, get_engine_for_client, engine_gestion
 from core.config import settings
 
-# Configuración de Logging
 logging.basicConfig(level=settings.LOG_LEVEL)
 logger = logging.getLogger("NFS-Service")
 
 app = FastAPI(title=settings.APP_TITLE)
+
+# @app.on_event("startup")
+# async def startup_event():
+#     logger.info("🔍 Verificando conectividad con la base de datos maestra...")
+#     try:
+#         # Importamos text para la consulta de prueba
+#         from sqlalchemy import text
+        
+#         # Intentamos una operación mínima (SELECT 1) con un timeout corto
+#         async with engine_gestion.connect() as conn:
+#             await conn.execute(text("SELECT 1"))
+#             logger.info("✅ CONEXIÓN EXITOSA: El microservicio llega a la DB de Gestión.")
+#     except Exception as e:
+#         logger.error(f"❌ ERROR DE CONEXIÓN INICIAL: No se pudo conectar a la DB maestra.")
+#         logger.error(f"Detalle técnico: {str(e)}")
+#         # No detenemos la app para permitir que Cloud Run termine de subir y ver los logs
 
 async def finalizar_auditoria_dinamica(
     audit_id: int, 
@@ -27,13 +45,10 @@ async def finalizar_auditoria_dinamica(
     start_time: float, 
     client_id: str, 
     codigo_http: int,
-    engine: AsyncEngine
+    engine: AsyncEngine,
+    request_id: int = None
 ):
-    """
-    Actualiza el resultado final en la base de datos del cliente.
-    """
     duracion = (time.time() - start_time) * 1000
-    
     async with AsyncSession(engine) as session:
         try:
             stmt = (
@@ -47,119 +62,143 @@ async def finalizar_auditoria_dinamica(
                     fecha_actualizacion=datetime.now(timezone.utc)
                 )
             )
+
             await session.execute(stmt)
+
+            if estado == "COMPLETED" and request_id:
+                # Usamos text() para la tabla tn_docs_descargas ya que parece ser una tabla de métricas
+                stmt_counter = text("""
+                    UPDATE tn_docs_descargas 
+                    SET descargas = COALESCE(descargas, 0) + 1 
+                    WHERE id = :req_id
+                """)
+                await session.execute(stmt_counter, {"req_id": request_id})
+                logger.info(f"📊 Contador incrementado para request_id: {request_id}")
+                
             await session.commit()
             logger.info(f"[Cliente: {client_id}] Auditoría {audit_id} cerrada como {estado}.")
         except Exception as e:
-            logger.error(f"[Cliente: {client_id}] Error al actualizar auditoría final: {e}")
+            await session.rollback()
+            logger.error(f"[Cliente: {client_id}] Error en finalizar_auditoria_dinamica: {e}")
 
 @app.get("/core/files/download/{audit_id}")
-async def download_file(audit_id: int, token: str, client_id: str, request: Request):
+async def download_file(
+    audit_id: int, 
+    token: str, 
+    client_id: str, 
+    request: Request,
+    background_tasks: BackgroundTasks
+):
     start_time = time.time()
     client_ip = AuthService.get_client_ip(request)
-    # Definimos la ruta base al inicio para evitar errores de NameError
     nfs_base_path = "/app/media" 
     
+    full_path = None
+    friendly_name = None
+    file_size = 0
+    engine_cliente = None
+    registro_id_for_stats = None
+
     try:
-        # 1. Obtener el motor del cliente
         engine_cliente = await get_engine_for_client(client_id)
         if not engine_cliente:
             raise HTTPException(status_code=404, detail="Configuración de cliente no encontrada.")
 
-        # 2. Conexión dinámica a la BD del cliente
         async for db in get_db_session(client_id):
-            
-            # 3. Buscar registro de auditoría
             result = await db.execute(select(DescargaAuditoria).where(DescargaAuditoria.id == audit_id))
             registro = result.scalars().first()
 
             if not registro:
                 raise HTTPException(status_code=404, detail="ID de auditoría inválido.")
             
-
-            # 4. Validaciones de Seguridad (Permisos y Anti-Spam)
+            registro_id_for_stats = registro.request_id
 
             try:
                 AuthService.validar_token_auditoria(token, registro)
             except HTTPException as e:
-                await finalizar_auditoria_dinamica(
-                    audit_id, "FAILED", 0, start_time, client_id, e.status_code, engine_cliente
-                )
+                background_tasks.add_task(finalizar_auditoria_dinamica, audit_id, "FAILED", 0, start_time, client_id, e.status_code, engine_cliente)
                 raise e
-           
 
             AuthService.validar_permiso_descarga(registro, client_ip)
             await AuthService.check_anti_spam(db, client_ip, registro.recurso, audit_id)
 
-            # 5. Localizar archivo en NFS
-            try:
-                full_path = FileService.get_secure_path(nfs_base_path, registro.recurso)
-            except HTTPException as e:
-                # Si el archivo no existe o no hay permisos en disco, cerramos auditoría aquí
-                await finalizar_auditoria_dinamica(
-                    audit_id, "FAILED", 0, start_time, client_id, e.status_code, engine_cliente
-                )
-                raise e
+            full_path = FileService.get_secure_path(nfs_base_path, registro.recurso)
+            file_size = os.path.getsize(full_path)
+            friendly_name = FileService.generate_friendly_filename(registro.nombre, registro.mime, audit_id)
+            
 
-            # 6. Preparar Metadatos
-            friendly_name = FileService.generate_friendly_filename(
-                nombre_db=registro.nombre, 
-                mime_type=registro.mime, 
-                audit_id=audit_id
-            )
-            content_type = registro.mime if registro.mime else "application/octet-stream"
-
-            # 7. Marcar como REDIRECTED (Inicio de descarga)
             registro.estado = "REDIRECTED"
             registro.ip = client_ip
             registro.fecha_actualizacion = datetime.now(timezone.utc)
             await db.commit()
+            break 
 
-            # 8. Streaming wrapper
-            async def stream_wrapper():
-                bytes_totales = 0
-                try:
-                    async for chunk in FileService.file_iterator(full_path):
-                        bytes_totales += len(chunk)
-                        yield chunk
-                    
-                    # ÉXITO: 200 OK
-                    await finalizar_auditoria_dinamica(
-                        audit_id, "COMPLETED", bytes_totales, start_time, client_id, 200, engine_cliente
-                    )
-                except Exception as e:
-                    logger.error(f"Error en streaming para auditoría {audit_id}: {e}")
-                    # ERROR DURANTE EL ENVÍO: 500
-                    await finalizar_auditoria_dinamica(
-                        audit_id, "FAILED", bytes_totales, start_time, client_id, 500, engine_cliente
-                    )
+        async def stream_wrapper():
+            bytes_sent = 0
+            success = False
+            #last_log_checkpoint = 0
+            #chunk_count = 0
+            try:
+                logger.info(f"🚀 Iniciando stream para ID {audit_id}. Tamaño total: {file_size} bytes")
 
-            return StreamingResponse(
-                stream_wrapper(),
-                media_type=content_type,
-                headers={
-                    "Content-Disposition": f'attachment; filename="{friendly_name}"',
-                    "X-Content-Type-Options": "nosniff"
-                }
-            )
+                async for chunk in FileService.file_iterator(full_path):
+                    #chunk_count += 1
+                    if await request.is_disconnected():
+                        #logger.warning(f"❌ Cliente desconectado prematuramente en byte {bytes_sent}")
+                        raise ClientDisconnect("Cliente desconectado")
+                    yield chunk
+                    bytes_sent += len(chunk)
 
+                    # Loguear cada 5MB para no saturar los logs pero tener rastro
+                    #if bytes_sent - last_log_checkpoint > 5 * 1024 * 1024:
+                        #logger.info(f"📥 Progreso ID {audit_id}: {bytes_sent}/{file_size} bytes sent...")
+                        #last_log_checkpoint = bytes_sent
+                
+                if bytes_sent >= file_size:
+                    success = True 
+                    logger.info(f"✅ Stream finalizado con éxito para ID {audit_id}. Total: {bytes_sent} bytes")
+
+            except Exception as e:
+                logger.warning(f"Error en stream {audit_id}: {e}")
+                logger.error(f"🔥 Error crítico en el stream de ID {audit_id} (Byte {bytes_sent}): {str(e)}")
+            finally:
+                if bytes_sent >= file_size:
+                    success = True
+                
+                estado_final = "COMPLETED" if success else "FAILED"
+                codigo_http = 200 if success else 499
+                background_tasks.add_task(
+                    finalizar_auditoria_dinamica,
+                    audit_id, estado_final, bytes_sent, start_time, client_id, codigo_http, engine_cliente, registro_id_for_stats
+                )
+
+        # --- CONFIGURACIÓN DE CABECERAS PARA DESCARGA FORZADA ---
+        # 1. Codificar nombre para evitar errores en headers con caracteres especiales
+        friendly_name_encoded = quote(friendly_name)
+        friendly_name_ascii = friendly_name.encode('ascii', 'ignore').decode('ascii')
+
+        return StreamingResponse(
+            stream_wrapper(),
+            # 2. Forzamos octet-stream para que el navegador no intente renderizar (PDF/JPG/etc)
+            media_type="application/octet-stream", 
+            headers={
+                # 3. 'attachment' fuerza la descarga. filename* asegura compatibilidad UTF-8
+                "Content-Disposition": f'attachment; filename="{friendly_name_ascii}"; filename*=UTF-8\'\'{friendly_name_encoded}',
+                #"Content-Length": str(file_size),
+                "X-Accel-Buffering": "no",
+                # 4. Prohibimos al navegador "adivinar" el contenido
+                "X-Content-Type-Options": "nosniff", 
+                "Cache-Control": "no-cache, no-store, must-revalidate",
+                "Pragma": "no-cache",
+                "Expires": "0",
+                "Accept-Ranges": "bytes"
+            }
+        )
+        
     except HTTPException as he:
-        # Re-lanzamos errores controlados de FastAPI
         raise he
-    except ValueError as ve:
-        # Error de client_id no encontrado en database.py
-        raise HTTPException(status_code=400, detail=str(ve))
     except Exception as ge:
         logger.error(f"Error inesperado: {ge}")
-        # Si ya teníamos el motor, intentamos cerrar la auditoría como error 500
-        if 'engine_cliente' in locals() and 'audit_id' in locals():
-            await finalizar_auditoria_dinamica(audit_id, "ERROR", 0, start_time, client_id, 500, engine_cliente)
+        if engine_cliente:
+            background_tasks.add_task(finalizar_auditoria_dinamica, audit_id, "ERROR", 0, start_time, client_id, 500, engine_cliente)
         raise HTTPException(status_code=500, detail="Error interno del servidor")
-    
-@app.get("/health")
-async def health_check():
-    return {
-        "status": "alive", 
-        "clients_active": list(_engines.keys()),
-        "total_active_connections": len(_engines)
-    }

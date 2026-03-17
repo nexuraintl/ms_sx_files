@@ -11,6 +11,12 @@ class Settings(BaseSettings):
     DB_GESTION_NAME: str = os.getenv("DB_GESTION_NAME", "gestion_clientes")
     DB_GESTION_PORT: int = int(os.getenv("DB_GESTION_PORT", 3306))
 
+    @property
+    def DATABASE_URL_GESTION(self) -> str:
+        return (
+            f"mysql+aiomysql://{self.DB_GESTION_USER}:{self.DB_GESTION_PASS}@"
+            f"{self.DB_GESTION_HOST}:{self.DB_GESTION_PORT}/{self.DB_GESTION_NAME}"
+        )
 
     # Configuración del Microservicio
     APP_TITLE: str = "NFS Download Microservice"
@@ -18,7 +24,7 @@ class Settings(BaseSettings):
     
     # Parámetros de Performance
     # 1MB por chunk es ideal para no saturar la RAM en descargas grandes
-    CHUNK_SIZE: int = 1024 * 1024 
+    CHUNK_SIZE: int = 64 * 1024 #256KB
     
     # Seguridad
     # Tiempo en segundos para el bloqueo anti-spam

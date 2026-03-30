@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 Base = declarative_base()
 
 class DescargaAuditoria(Base):
-    __tablename__ = "tn_descargas_auditoria"
+    __tablename__ = "tn_sx_files_download"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     nombre = Column(String(255))    

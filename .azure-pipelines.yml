@@ -1,60 +1,47 @@
-# .azure-pipelines.yml
-# Sincroniza Azure masterOps (rama master) -> GitHub (rama master)
-
+# .azure-pipelines.yml unificado
 trigger:
   branches:
     include:
+      - dev
+      - qa
       - master
 
 pool:
   vmImage: ubuntu-latest
 
 variables:
-  GIT_USER: "santiago_valenzuela" #Nombre del usuario en Azure
-  GIT_EMAIL: "svalenzuela@nexura.com" #Correo del Azure
-  GITHUB_ORG: "nexuraintl" #Nombre del usuario dueño de la repo en GitHub
-  GITHUB_REPO: "ms_core_files" #Nombre del Repo dueño de la repo en GitHub
+  GIT_USER: $(Build.RequestedFor)
+  GIT_EMAIL: $(Build.RequestedForEmail)
+  GITHUB_ORG: "nexuraintl"
+  GITHUB_REPO: "ms-sx-files"
+  # Detectamos el nombre de la rama dinámicamente
+  BRANCH_NAME: $(Build.SourceBranchName)
 
 steps:
   - checkout: self
     clean: true
-    persistCredentials: true  # importante para no perder auth del repo Azure
+    persistCredentials: true
 
-  # 1️⃣ Validar rama
+  # 1️⃣ Configurar Git
   - script: |
-      echo "Validando rama..."
-      echo "Build.SourceBranchName = '$(Build.SourceBranchName)'"
-      echo "Build.SourceBranch = '$(Build.SourceBranch)'"
-      if [ "$(Build.SourceBranch)" != "refs/heads/master" ]; then
-        echo "❌ Solo la rama 'master' puede sincronizarse con GitHub."
-        exit 1
-      fi
-    displayName: "Validar rama origen"
-
-  # 2️⃣ Configurar Git
-  - script: |
+      echo "Configurando Git para el autor: $(GIT_USER) <$(GIT_EMAIL)>"
       git config --global user.name "$(GIT_USER)"
       git config --global user.email "$(GIT_EMAIL)"
     displayName: "Configurar Git"
 
-  # 3️⃣ Sincronizar con GitHub
+  # 2️⃣ Sincronizar con GitHub (Dinámico)
   - script: |
-      echo "Deshabilitando shallow clone..."
+      echo "Sincronizando rama: $(BRANCH_NAME) con GitHub..."
+      
       git fetch --unshallow || true
       git fetch --all
 
       echo "Configurando remoto de GitHub..."
-      git remote add github https://$(GITHUB_TOKEN_NEXURAINTL)@github.com/$(GITHUB_ORG)/$(GITHUB_REPO).git || git remote set-url github https://$(GITHUB_TOKEN_NEXURAINTL)@github.com/$(GITHUB_ORG)/$(GITHUB_REPO).git
+      git remote add github https://$(GITHUB_TOKEN_NEXURAINTL)@github.com/$(GITHUB_ORG)/$(GITHUB_REPO).git || \
+      git remote set-url github https://$(GITHUB_TOKEN_NEXURAINTL)@github.com/$(GITHUB_ORG)/$(GITHUB_REPO).git
 
-      echo "Verificando HEAD..."
-      git log -1 --oneline
-
-      echo "Empujando historial completo hacia rama master (GitHub)..."
-      git push github HEAD:master --force -v
-
-      echo "Verificando ramas remotas..."
-      git ls-remote github
+      echo "Empujando historial hacia rama $(BRANCH_NAME) en GitHub..."
+      git push github HEAD:$(BRANCH_NAME) --force -v
     env:
       GITHUB_TOKEN_NEXURAINTL: $(GITHUB_TOKEN_NEXURAINTL)
-    displayName: "Sincronizar con GitHub"
-    
+    displayName: "Sincronizar $(BRANCH_NAME) con GitHub"

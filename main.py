@@ -14,7 +14,7 @@ from starlette.requests import ClientDisconnect
 from models import DescargaAuditoria
 from services.file_service import FileService
 from services.auth_service import AuthService
-from database1 import get_db_session, get_engine_for_client, engine_gestion
+from database import get_db_session, get_engine_for_client, engine_gestion
 from core.config import settings
 
 logging.basicConfig(level=settings.LOG_LEVEL)

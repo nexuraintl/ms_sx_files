@@ -13,7 +13,7 @@ variables:
   GIT_USER: $(Build.RequestedFor)
   GIT_EMAIL: $(Build.RequestedForEmail)
   GITHUB_ORG: "nexuraintl"
-  GITHUB_REPO: "ms-sx-files"
+  GITHUB_REPO: "ms_sx_files"
   # Detectamos el nombre de la rama dinámicamente
   BRANCH_NAME: $(Build.SourceBranchName)
 

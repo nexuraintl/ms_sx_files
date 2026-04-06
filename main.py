@@ -81,7 +81,7 @@ async def finalizar_auditoria_dinamica(
             await session.rollback()
             logger.error(f"[Cliente: {client_id}] Error en finalizar_auditoria_dinamica: {e}")
 
-@app.get("/sx/files/download/{audit_id}")
+@app.get("/download/{audit_id}")
 async def download_file(
     audit_id: int, 
     token: str, 

@@ -11,7 +11,7 @@ logger = logging.getLogger("NFS-Service")
 # Aquí quemamos los datos de la tabla 'tn_gestion_bdconex' para el cliente 20001
 MOCK_CLIENTS_DB = {
     "20001": {
-        "nombreBaseDeDatos": "portal_coomeva_import",
+        "nombreBaseDeDatos": "pre_gestion_bdconex",
         "usuario": "portal_coomeva_import",
         "contraseña": "8wLVK3wi3l3x",
         "hosting": "10.142.0.7",  # IP interna del cliente

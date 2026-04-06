@@ -42,7 +42,7 @@ async def get_engine_for_client(client_id: str) -> AsyncEngine:
                 SELECT 
                     nombreBaseDeDatos, 
                     usuario, 
-                    contraseña as password, 
+                    contrasena as password, 
                     hosting, 
                     puerto 
                 FROM tn_gestion_bdconex 

@@ -7,71 +7,84 @@ from schemas import ClientDBConfig
 
 logger = logging.getLogger("NFS-Service")
 
-# --- MOCK DE LA BASE DE DATOS MAESTRA ---
-# Aquí quemamos los datos de la tabla 'tn_gestion_bdconex' para el cliente 20001
-MOCK_CLIENTS_DB = {
-    "20001": {
-        "nombreBaseDeDatos": "pre_gestion_bdconex",
-        "usuario": "portal_coomeva_import",
-        "contraseña": "8wLVK3wi3l3x",
-        "hosting": "10.142.0.7",  # IP interna del cliente
-        "puerto": 3306
-    }
-}
+# 1. MOTOR DE GESTIÓN (Base de datos maestra donde están las credenciales de clientes)
+# Asegúrate de que settings.DATABASE_URL_GESTION tenga el formato:
+# mysql+aiomysql://usuario:password@IP_MAESTRA:3306/nombre_bd_gestion
+engine_gestion = create_async_engine(
+    settings.DATABASE_URL_GESTION,
+    pool_size=5,
+    max_overflow=2,
+    pool_recycle=3600,
+    pool_pre_ping=True,
+    connect_args={"connect_timeout": 5}
+)
 
-# 1. MOTOR DE GESTIÓN (Temporalmente dummy para evitar el error 504/2003)
-# Usamos una URL de sqlite en memoria o simplemente no lo inicializamos
-engine_gestion = None 
 
-# Cache para motores de BD de clientes
+# Cache para motores de BD de clientes (para no recrear la conexión en cada petición)
 _engines: dict[str, AsyncEngine] = {}
 
 async def get_engine_for_client(client_id: str) -> AsyncEngine:
     """
-    Versión HÍBRIDA: Simula la consulta a la BD maestra usando el diccionario quemado.
+    Consulta la BD maestra para obtener las credenciales del cliente
+    y retorna (o crea) su motor de conexión.
     """
     if client_id in _engines:
         return _engines[client_id]
 
-    logger.info(f"🛠️ MODO TEMPORAL: Obteniendo credenciales quemadas para cliente: {client_id}")
+    logger.info(f"🔍 Consultando credenciales maestras para cliente: {client_id}")
 
-    # Simulamos la respuesta de la base de datos maestra
-    row = MOCK_CLIENTS_DB.get(client_id)
-
-    if not row:
-        logger.error(f"❌ No se encontró configuración MOCK para el cliente: {client_id}")
-        return None
-
-    try:
-        # Validamos con el esquema de Pydantic (usamos 'password' para que coincida con el esquema)
-        config_data = row.copy()
-        if "contraseña" in config_data:
-            config_data["password"] = config_data.pop("contraseña")
+    async_session_gestion = sessionmaker(engine_gestion, expire_on_commit=False, class_=AsyncSession)
+    
+    async with async_session_gestion() as session:
+        try:
+            # Consulta a la tabla donde guardas las conexiones (ajusta los nombres de campos si varían)
+            query = text("""
+                SELECT 
+                    nombreBaseDeDatos, 
+                    usuario, 
+                    contraseña as password, 
+                    hosting, 
+                    puerto 
+                FROM tn_gestion_bdconex 
+                WHERE id_cliente = :client_id 
+                AND estado = 1 
+                LIMIT 1
+            """)
             
-        config = ClientDBConfig.model_validate(config_data)
-        
-        url_cliente = (
-            f"mysql+aiomysql://{config.usuario}:{config.password}@"
-            f"{config.hosting}:{config.puerto}/{config.nombreBaseDeDatos}"
-        )
-        
-        logger.info(f"🏗️ Creando pool de conexiones para cliente: {client_id} (Hacia {config.hosting})")
-        
-        _engines[client_id] = create_async_engine(
-            url_cliente, 
-            pool_size=10,
-            max_overflow=20, 
-            pool_recycle=3600,
-            pool_pre_ping=True,
-            connect_args={"connect_timeout": 10} # Timeout para la DB del cliente
-        )
-        return _engines[client_id]
+            result = await session.execute(query, {"client_id": client_id})
+            row = result.mappings().first()
 
-    except Exception as e:
-        logger.error(f"🔥 Error al crear motor para cliente {client_id}: {str(e)}")
-        return None
+            if not row:
+                logger.error(f"❌ No se encontró configuración activa para el cliente: {client_id}")
+                return None
+
+            # Validamos con el esquema de Pydantic
+            config = ClientDBConfig.model_validate(dict(row))
+            
+            url_cliente = (
+                f"mysql+aiomysql://{config.usuario}:{config.password}@"
+                f"{config.hosting}:{config.puerto}/{config.nombreBaseDeDatos}"
+            )
+            
+            logger.info(f"🏗️ Creando nuevo pool de conexiones para cliente: {client_id}")
+            
+            _engines[client_id] = create_async_engine(
+                url_cliente, 
+                pool_size=10,        # Aumentado para producción
+                max_overflow=20, 
+                pool_recycle=3600,
+                pool_pre_ping=True
+            )
+            return _engines[client_id]
+
+        except Exception as e:
+            logger.error(f"🔥 Error al obtener motor para cliente {client_id}: {str(e)}")
+            return None
 
 async def get_db_session(client_id: str):
+    """
+    Generador de sesiones para el cliente solicitado.
+    """
     engine = await get_engine_for_client(client_id)
     if not engine:
         raise ValueError(f"No se pudo establecer conexión para el cliente: {client_id}")

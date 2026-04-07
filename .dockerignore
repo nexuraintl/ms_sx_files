@@ -1,0 +1,13 @@
+# Git
+.git/
+.gitignore
+.gitattributes
+
+# Documentación
+README.md
+*.md
+
+# CI/CD
+.github/
+.azure-pipelines.yml
+

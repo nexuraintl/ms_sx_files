@@ -99,12 +99,19 @@ async def download_file(
     engine_cliente = None
     registro_id_for_stats = None
 
+    # --- CAPA 0: VALIDACIÓN DE IDENTIDAD CRIPTOGRÁFICA (EL PORTERO) ---
+    # Validamos con Google antes de CUALQUIER otra operación.
+    # Si falla aquí, lanzamos 401/403 de inmediato sin tocar la DB.
+    AuthService.validar_access_token_google(token, client_id)
+
     try:
+        # --- CAPA 1: CONECTIVIDAD ---
         engine_cliente = await get_engine_for_client(client_id)
         if not engine_cliente:
             raise HTTPException(status_code=404, detail="Configuración de cliente no encontrada.")
 
         async for db in get_db_session(client_id):
+            # --- CAPA 2: EXISTENCIA DEL REGISTRO ---
             result = await db.execute(select(DescargaAuditoria).where(DescargaAuditoria.id == audit_id))
             registro = result.scalars().first()
 
@@ -113,30 +120,30 @@ async def download_file(
             
             registro_id_for_stats = registro.request_id
 
+            # --- CAPA 3: VINCULACIÓN TOKEN-REGISTRO ---
             try:
-                AuthService.validar_access_token_google(token, client_id)
+                AuthService.validar_token_auditoria(token, registro)
             except HTTPException as e:
-                # Si el token es inválido, auditamos el fallo antes de lanzar el error
                 background_tasks.add_task(
                     finalizar_auditoria_dinamica, 
                     audit_id, "FAILED", 0, start_time, client_id, e.status_code, engine_cliente
                 )
                 raise e
 
-            try:
-                AuthService.validar_token_auditoria(token, registro)
-            except HTTPException as e:
-                background_tasks.add_task(finalizar_auditoria_dinamica, audit_id, "FAILED", 0, start_time, client_id, e.status_code, engine_cliente)
-                raise e
-
+            # --- CAPA 4: REGLAS DE NEGOCIO (IP Y SPAM) ---
             AuthService.validar_permiso_descarga(registro, client_ip)
             await AuthService.check_anti_spam(db, client_ip, registro.recurso, audit_id)
 
+            # --- CAPA 5: PREPARACIÓN DE ARCHIVO ---
             full_path = FileService.get_secure_path(nfs_base_path, registro.recurso)
+            if not os.path.exists(full_path):
+                logger.error(f"Fisicamente no existe el archivo: {full_path}")
+                raise HTTPException(status_code=404, detail="El archivo físico no se encuentra en el servidor.")
+                
             file_size = os.path.getsize(full_path)
             friendly_name = FileService.generate_friendly_filename(registro.nombre, registro.mime, audit_id)
-            
 
+            # Actualizamos estado a REDIRECTED (en proceso)
             registro.estado = "REDIRECTED"
             registro.ip = client_ip
             registro.fecha_actualizacion = datetime.now(timezone.utc)
@@ -146,35 +153,22 @@ async def download_file(
         async def stream_wrapper():
             bytes_sent = 0
             success = False
-            #last_log_checkpoint = 0
-            #chunk_count = 0
             try:
                 logger.info(f"🚀 Iniciando stream para ID {audit_id}. Tamaño total: {file_size} bytes")
 
                 async for chunk in FileService.file_iterator(full_path):
-                    #chunk_count += 1
                     if await request.is_disconnected():
-                        #logger.warning(f"❌ Cliente desconectado prematuramente en byte {bytes_sent}")
                         raise ClientDisconnect("Cliente desconectado")
                     yield chunk
                     bytes_sent += len(chunk)
-
-                    # Loguear cada 5MB para no saturar los logs pero tener rastro
-                    #if bytes_sent - last_log_checkpoint > 5 * 1024 * 1024:
-                        #logger.info(f"📥 Progreso ID {audit_id}: {bytes_sent}/{file_size} bytes sent...")
-                        #last_log_checkpoint = bytes_sent
                 
                 if bytes_sent >= file_size:
                     success = True 
                     logger.info(f"✅ Stream finalizado con éxito para ID {audit_id}. Total: {bytes_sent} bytes")
 
             except Exception as e:
-                logger.warning(f"Error en stream {audit_id}: {e}")
                 logger.error(f"🔥 Error crítico en el stream de ID {audit_id} (Byte {bytes_sent}): {str(e)}")
             finally:
-                if bytes_sent >= file_size:
-                    success = True
-                
                 estado_final = "COMPLETED" if success else "FAILED"
                 codigo_http = 200 if success else 499
                 background_tasks.add_task(
@@ -182,21 +176,17 @@ async def download_file(
                     audit_id, estado_final, bytes_sent, start_time, client_id, codigo_http, engine_cliente, registro_id_for_stats
                 )
 
-        # --- CONFIGURACIÓN DE CABECERAS PARA DESCARGA FORZADA ---
-        # 1. Codificar nombre para evitar errores en headers con caracteres especiales
+        # Codificación de cabeceras
         friendly_name_encoded = quote(friendly_name)
         friendly_name_ascii = friendly_name.encode('ascii', 'ignore').decode('ascii')
 
         return StreamingResponse(
             stream_wrapper(),
-            # 2. Forzamos octet-stream para que el navegador no intente renderizar (PDF/JPG/etc)
             media_type="application/octet-stream", 
             headers={
-                # 3. 'attachment' fuerza la descarga. filename* asegura compatibilidad UTF-8
                 "Content-Disposition": f'attachment; filename="{friendly_name_ascii}"; filename*=UTF-8\'\'{friendly_name_encoded}',
-                #"Content-Length": str(file_size),
+                "Content-Length": str(file_size),
                 "X-Accel-Buffering": "no",
-                # 4. Prohibimos al navegador "adivinar" el contenido
                 "X-Content-Type-Options": "nosniff", 
                 "Cache-Control": "no-cache, no-store, must-revalidate",
                 "Pragma": "no-cache",
@@ -206,6 +196,7 @@ async def download_file(
         )
         
     except HTTPException as he:
+        # Errores controlados (401, 403, 404, etc.)
         raise he
     except Exception as ge:
         logger.error(f"Error inesperado: {ge}")

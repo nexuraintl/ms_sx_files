@@ -11,3 +11,4 @@ pydantic-settings>=2.1.0  # Necesario a veces para conexiones SSL seguras a MySQ
 greenlet==3.0.3
 google-auth==2.23.0
 requests==2.31.0
+python-multipart==0.0.20

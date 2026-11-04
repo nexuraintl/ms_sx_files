@@ -30,10 +30,15 @@ COPY . .
 # Esto es buena práctica para evitar errores si se corre en local sin montar nada.
 RUN mkdir -p /app/media
 
-# Creamos un usuario no-root por seguridad (Best Practice en Contenedores)
-# Nota: Cloud Run ignora esto si no se configura, pero es bueno tenerlo.
-RUN adduser --disabled-password --gecos "" appuser
-USER appuser
+# Crear usuario portal con UID 1999
+RUN adduser \
+    --disabled-password \
+    --gecos "" \
+    --uid 1999 \
+    portal
+
+# Ejecutar el servicio como portal
+USER portal
 
 # Exponemos el puerto (Cloud Run inyecta la variable PORT, por defecto 8080)
 EXPOSE 8080

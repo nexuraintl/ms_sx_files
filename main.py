@@ -461,7 +461,7 @@ async def upload_files(
     # 1. Validación de autenticación
     # --------------------------------------------------------
 
-    valid_token = await AuthService.validar_access_token_google(
+    valid_token = AuthService.validar_access_token_google(
         token,
         client_id
     )

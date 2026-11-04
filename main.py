@@ -330,17 +330,16 @@ def parse_publication_date(value: Optional[str]) -> Optional[datetime]:
         )
 
 
-async def get_next_file_id() -> int:
+async def get_next_file_id(client_engine: AsyncEngine) -> int:
     """
-    Obtiene e incrementa el consecutivo consFiles de forma segura.
+    Incrementa el consecutivo consFiles en la base de datos
+    del cliente.
     """
 
-    async with AsyncSession(engine_gestion) as session:
-
+    async with AsyncSession(client_engine) as session:
         try:
             async with session.begin():
 
-                # Bloquea el registro del consecutivo
                 result = await session.execute(
                     text("""
                         SELECT valor
@@ -359,14 +358,13 @@ async def get_next_file_id() -> int:
 
                 if not row:
                     raise ValueError(
-                        "No existe el registro Sx / consFiles "
-                        "en tn_sx_vars"
+                        "No existe el consecutivo Sx / consFiles "
+                        "en la base de datos del cliente"
                     )
 
                 current_value = int(row[0])
                 next_id = current_value + 1
 
-                # Actualiza el consecutivo
                 update_result = await session.execute(
                     text("""
                         UPDATE tn_sx_vars
@@ -383,28 +381,26 @@ async def get_next_file_id() -> int:
 
                 if update_result.rowcount != 1:
                     raise ValueError(
-                        "No fue posible actualizar el consecutivo"
+                        "No fue posible actualizar consFiles"
                     )
 
-            # El contexto session.begin() realiza el commit
             logger.info(
-                "Consecutivo consFiles generado: %s",
+                "Consecutivo generado en BD del cliente: %s",
                 next_id
             )
 
             return next_id
 
         except Exception as exc:
-
             logger.exception(
-                "Error generando consecutivo consFiles: %s",
-                str(exc)
+                "Error generando consecutivo en BD del cliente"
             )
 
             raise HTTPException(
                 status_code=500,
                 detail="Error generando el consecutivo del archivo"
             ) from exc
+
 
 
 async def save_upload_file(
@@ -639,7 +635,7 @@ async def upload_files(
                 # 5.1 Obtener consecutivo
                 # --------------------------------------------
 
-                file_id = await get_next_file_id()
+                file_id = await get_next_file_id(client_engine)
 
                 # --------------------------------------------
                 # 5.2 Nombre físico

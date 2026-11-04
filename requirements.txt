@@ -12,3 +12,4 @@ greenlet==3.0.3
 google-auth==2.23.0
 requests==2.31.0
 python-multipart==0.0.20
+PyMySQL==1.1.1

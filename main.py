@@ -332,54 +332,73 @@ def parse_publication_date(value: Optional[str]) -> Optional[datetime]:
 
 async def get_next_file_id() -> int:
     """
-    Incrementa atómicamente el consecutivo consFiles en tn_sx_vars.
-
-    El UPDATE y LAST_INSERT_ID() deben ejecutarse en la misma
-    conexión MySQL.
+    Obtiene e incrementa el consecutivo consFiles de forma segura.
     """
 
     async with AsyncSession(engine_gestion) as session:
+
         try:
-            await session.execute(
-                text("""
-                    UPDATE tn_sx_vars
-                    SET valor = LAST_INSERT_ID(
-                        CAST(valor AS UNSIGNED) + 1
-                    )
-                    WHERE modulo = :modulo
-                      AND variable = :variable
-                """),
-                {
-                    "modulo": "Sx",
-                    "variable": "consFiles"
-                }
-            )
+            async with session.begin():
 
-            result = await session.execute(
-                text("SELECT LAST_INSERT_ID()")
-            )
-
-            next_id = result.scalar_one()
-
-            if not next_id:
-                raise HTTPException(
-                    status_code=500,
-                    detail="No fue posible obtener el consecutivo de archivos"
+                # Bloquea el registro del consecutivo
+                result = await session.execute(
+                    text("""
+                        SELECT valor
+                        FROM tn_sx_vars
+                        WHERE modulo = :modulo
+                          AND variable = :variable
+                        FOR UPDATE
+                    """),
+                    {
+                        "modulo": "Sx",
+                        "variable": "consFiles"
+                    }
                 )
 
-            await session.commit()
+                row = result.first()
 
-            return int(next_id)
+                if not row:
+                    raise ValueError(
+                        "No existe el registro Sx / consFiles "
+                        "en tn_sx_vars"
+                    )
 
-        except HTTPException:
-            await session.rollback()
-            raise
+                current_value = int(row[0])
+                next_id = current_value + 1
+
+                # Actualiza el consecutivo
+                update_result = await session.execute(
+                    text("""
+                        UPDATE tn_sx_vars
+                        SET valor = :next_id
+                        WHERE modulo = :modulo
+                          AND variable = :variable
+                    """),
+                    {
+                        "next_id": next_id,
+                        "modulo": "Sx",
+                        "variable": "consFiles"
+                    }
+                )
+
+                if update_result.rowcount != 1:
+                    raise ValueError(
+                        "No fue posible actualizar el consecutivo"
+                    )
+
+            # El contexto session.begin() realiza el commit
+            logger.info(
+                "Consecutivo consFiles generado: %s",
+                next_id
+            )
+
+            return next_id
 
         except Exception as exc:
-            await session.rollback()
 
             logger.exception(
-                "Error incrementando el consecutivo consFiles"
+                "Error generando consecutivo consFiles: %s",
+                str(exc)
             )
 
             raise HTTPException(

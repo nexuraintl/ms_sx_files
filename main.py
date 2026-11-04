@@ -768,33 +768,43 @@ async def upload_files(
 
             except Exception as exc:
 
-                await db.rollback()
+            await db.rollback()
 
-                if destination and destination.exists():
-                    destination.unlink(missing_ok=True)
+            logger.exception(
+                "UPLOAD ERROR | filename=%s | file_id=%s | destination=%s | error=%s",
+                upload_file.filename,
+                file_id,
+                destination,
+                str(exc)
+            )
 
-                if file_id:
-                    try:
-                        await db.execute(
-                            text("""
-                                DELETE FROM tn_sx_files
-                                WHERE id = :id
-                            """),
-                            {"id": file_id}
-                        )
-                        await db.commit()
-                    except Exception:
-                        await db.rollback()
+            if destination and destination.exists():
+                destination.unlink(missing_ok=True)
 
-                logger.exception(
-                    "Error cargando archivo %s",
-                    upload_file.filename
-                )
+            if file_id:
+                try:
+                    await db.execute(
+                        text("""
+                            DELETE FROM tn_sx_files
+                            WHERE id = :id
+                        """),
+                        {"id": file_id}
+                    )
+                    await db.commit()
 
-                failed_files.append({
-                    "filename": upload_file.filename,
-                    "error": "Error interno procesando el archivo"
-                })
+                except Exception as delete_exc:
+                    await db.rollback()
+
+                    logger.exception(
+                        "Error eliminando registro compensatorio id=%s: %s",
+                        file_id,
+                        str(delete_exc)
+                    )
+
+            failed_files.append({
+                "filename": upload_file.filename,
+                "error": str(exc)
+            })
 
         break
 

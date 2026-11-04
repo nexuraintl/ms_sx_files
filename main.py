@@ -538,8 +538,6 @@ async def upload_files(
 
     upload_directory = (
         UPLOAD_BASE_PATH
-        / cliente_folder
-        / "media"
     )
 
     # --------------------------------------------------------

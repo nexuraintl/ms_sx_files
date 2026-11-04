@@ -33,8 +33,6 @@ RUN mkdir -p /app/media
 # Creamos un usuario no-root por seguridad (Best Practice en Contenedores)
 # Nota: Cloud Run ignora esto si no se configura, pero es bueno tenerlo.
 RUN adduser --disabled-password --gecos "" appuser
-# Mostrar UID y GID del usuario
-RUN id appuser
 USER appuser
 
 # Exponemos el puerto (Cloud Run inyecta la variable PORT, por defecto 8080)

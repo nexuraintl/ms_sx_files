@@ -11,6 +11,7 @@ class ClientDBConfig(BaseModel):
     password: str = Field(..., alias="contrasena") 
     hosting: str
     puerto: int = 3306
+    clienteFolder: str
 
     class Config:
         # Esto permite que Pydantic lea los datos tanto de diccionarios 

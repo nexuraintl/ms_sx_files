@@ -23,6 +23,7 @@ engine_gestion = create_async_engine(
 
 # Cache para motores de BD de clientes (para no recrear la conexión en cada petición)
 _engines: dict[str, AsyncEngine] = {}
+_client_folders: dict[str, str] = {}
 
 async def get_engine_for_client(client_id: str) -> AsyncEngine:
     """
@@ -45,7 +46,8 @@ async def get_engine_for_client(client_id: str) -> AsyncEngine:
                     usuario, 
                     contrasena as password, 
                     hosting, 
-                    puerto 
+                    puerto,
+                    clienteFolder
                 FROM tn_gestion_bdconex 
                 WHERE idCliente = :client_id 
                 LIMIT 1
@@ -60,6 +62,7 @@ async def get_engine_for_client(client_id: str) -> AsyncEngine:
 
             # Validamos con el esquema de Pydantic
             config = ClientDBConfig.model_validate(dict(row))
+            _client_folders[client_id] = config.clienteFolder
 
             password_safe = quote_plus(config.password)
             user_safe = quote_plus(config.usuario)
@@ -95,3 +98,15 @@ async def get_db_session(client_id: str):
     async_session = sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
     async with async_session() as session:
         yield session
+
+async def get_client_folder(client_id: str) -> str | None:
+    """
+    Retorna la carpeta de medios configurada para el cliente.
+    """
+
+    engine = await get_engine_for_client(client_id)
+
+    if not engine:
+        return None
+
+    return _client_folders.get(client_id)

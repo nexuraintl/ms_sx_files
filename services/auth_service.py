@@ -24,7 +24,7 @@ class AuthService:
         try:
             # El campo 'aud' en tu JSON es el Client ID de la App de Google
             # Lo validamos para asegurar que el token fue emitido para tu proyecto
-            expected_audience = "618104708054-9r9s1c4alg36erliucho9t52n32n6dgq.apps.googleusercontent.com"
+            expected_audience = "https://apig-nexura-pre-qa-cr4m0bsh.ue.gateway.dev"
             
             # verify_oauth2_token hace todo el trabajo pesado:
             # 1. Descarga certs de https://www.googleapis.com/oauth2/v3/certs

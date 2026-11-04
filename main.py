@@ -17,6 +17,17 @@ from services.auth_service import AuthService
 from database import get_db_session, get_engine_for_client, engine_gestion
 from core.config import settings
 
+#importaciones adicionales para upload
+import re
+import shutil
+from pathlib import Path
+from datetime import datetime, timezone
+from typing import Optional
+
+from fastapi import File, Form, UploadFile
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession
+
 logging.basicConfig(level=settings.LOG_LEVEL)
 logger = logging.getLogger("NFS-Service")
 
@@ -227,3 +238,565 @@ async def download_file(
         if engine_cliente:
             background_tasks.add_task(finalizar_auditoria_dinamica, audit_id, "ERROR", 0, start_time, client_id, 500, engine_cliente)
         raise HTTPException(status_code=500, detail="Error interno del servidor")
+
+
+# ============================================================
+# UPLOAD FILES
+# ============================================================
+
+UPLOAD_BASE_PATH = Path("/app/media")
+MAX_UPLOAD_SIZE = 50 * 1024 * 1024  # 50 MB por archivo
+MAX_FILES = 3
+
+
+def sanitize_path_component(value: str) -> str:
+    """
+    Sanitiza un componente de ruta para evitar path traversal.
+    """
+    value = value.strip()
+
+    if not value or value in {".", ".."}:
+        raise HTTPException(
+            status_code=400,
+            detail="Componente de ruta inválido"
+        )
+
+    sanitized = re.sub(r"[^a-zA-Z0-9_-]", "", value)
+
+    if not sanitized:
+        raise HTTPException(
+            status_code=400,
+            detail="Componente de ruta inválido"
+        )
+
+    return sanitized
+
+
+def normalize_module_name(modulo: str) -> str:
+    """
+    Equivalente aproximado al comportamiento ucfirst() de PHP.
+    """
+    modulo = sanitize_path_component(modulo)
+
+    return modulo[:1].upper() + modulo[1:]
+
+
+def parse_expedition_date(value: Optional[str]) -> Optional[int]:
+    """
+    Convierte una fecha de expedición a timestamp Unix.
+    """
+    if not value or not value.strip():
+        return None
+
+    value = value.strip()
+
+    try:
+        parsed_date = datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+        if parsed_date.tzinfo is None:
+            parsed_date = parsed_date.replace(tzinfo=timezone.utc)
+
+        return int(parsed_date.timestamp())
+
+    except ValueError:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Fecha de expedición inválida: {value}"
+        )
+
+
+def parse_publication_date(value: Optional[str]) -> Optional[datetime]:
+    """
+    Convierte la fecha de publicación para MySQL.
+    """
+    if not value or not value.strip():
+        return None
+
+    value = value.strip()
+
+    try:
+        parsed_date = datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+        if parsed_date.tzinfo is not None:
+            parsed_date = parsed_date.astimezone(timezone.utc)
+            parsed_date = parsed_date.replace(tzinfo=None)
+
+        return parsed_date
+
+    except ValueError:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Fecha de publicación inválida: {value}"
+        )
+
+
+async def get_next_file_id() -> int:
+    """
+    Incrementa atómicamente el consecutivo consFiles en tn_sx_vars.
+
+    El UPDATE y LAST_INSERT_ID() deben ejecutarse en la misma
+    conexión MySQL.
+    """
+
+    async with AsyncSession(engine_gestion) as session:
+        try:
+            await session.execute(
+                text("""
+                    UPDATE tn_sx_vars
+                    SET valor = LAST_INSERT_ID(
+                        CAST(valor AS UNSIGNED) + 1
+                    )
+                    WHERE modulo = :modulo
+                      AND variable = :variable
+                """),
+                {
+                    "modulo": "Sx",
+                    "variable": "consFiles"
+                }
+            )
+
+            result = await session.execute(
+                text("SELECT LAST_INSERT_ID()")
+            )
+
+            next_id = result.scalar_one()
+
+            if not next_id:
+                raise HTTPException(
+                    status_code=500,
+                    detail="No fue posible obtener el consecutivo de archivos"
+                )
+
+            await session.commit()
+
+            return int(next_id)
+
+        except HTTPException:
+            await session.rollback()
+            raise
+
+        except Exception as exc:
+            await session.rollback()
+
+            logger.exception(
+                "Error incrementando el consecutivo consFiles"
+            )
+
+            raise HTTPException(
+                status_code=500,
+                detail="Error generando el consecutivo del archivo"
+            ) from exc
+
+
+async def save_upload_file(
+    upload_file: UploadFile,
+    destination: Path
+) -> int:
+    """
+    Guarda un archivo de manera incremental evitando cargarlo
+    completamente en memoria.
+
+    Retorna el tamaño real guardado.
+    """
+
+    total_size = 0
+
+    destination.parent.mkdir(
+        parents=True,
+        exist_ok=True
+    )
+
+    try:
+        with destination.open("wb") as destination_file:
+
+            while True:
+                chunk = await upload_file.read(1024 * 1024)
+
+                if not chunk:
+                    break
+
+                total_size += len(chunk)
+
+                if total_size > MAX_UPLOAD_SIZE:
+                    raise HTTPException(
+                        status_code=413,
+                        detail="El archivo supera el tamaño máximo permitido"
+                    )
+
+                destination_file.write(chunk)
+
+        return total_size
+
+    except Exception:
+        if destination.exists():
+            destination.unlink(missing_ok=True)
+
+        raise
+
+    finally:
+        await upload_file.close()
+
+
+@app.post("/upload")
+async def upload_files(
+    request: Request,
+    modulo: str = Form(...),
+    opcion: str = Form(...),
+    idRel: int = Form(...),
+    archivos: list[UploadFile] = File(...),
+    descripcion: list[str] = Form(default=[]),
+    tipo: list[str] = Form(default=[]),
+    expedicion: list[str] = Form(default=[]),
+    fpublicacion: list[str] = Form(default=[]),
+    seguro: list[str] = Form(default=[]),
+    feedback: bool = Form(default=False),
+    client_id: str = Form(...),
+    token: str = Form(...)
+):
+    """
+    Endpoint equivalente a regNuevos2() del PHP legado.
+    """
+
+    # --------------------------------------------------------
+    # 1. Validación de autenticación
+    # --------------------------------------------------------
+
+    valid_token = await AuthService.validar_access_token_google(
+        token,
+        client_id
+    )
+
+    if not valid_token:
+        raise HTTPException(
+            status_code=401,
+            detail="Token de autenticación inválido"
+        )
+
+    # --------------------------------------------------------
+    # 2. Validación de archivos
+    # --------------------------------------------------------
+
+    if not archivos:
+        raise HTTPException(
+            status_code=400,
+            detail="No se recibieron archivos"
+        )
+
+    if len(archivos) > MAX_FILES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Se permite cargar máximo {MAX_FILES} archivos"
+        )
+
+    # --------------------------------------------------------
+    # 3. Obtener configuración del cliente
+    # --------------------------------------------------------
+
+    client_engine = await get_engine_for_client(client_id)
+
+    if not client_engine:
+        raise HTTPException(
+            status_code=404,
+            detail="No se encontró la configuración de base de datos del cliente"
+        )
+
+    cliente_folder = await get_client_folder(client_id)
+
+    if not cliente_folder:
+        raise HTTPException(
+            status_code=400,
+            detail="El cliente no tiene configurado clienteFolder"
+        )
+
+    cliente_folder = sanitize_path_component(cliente_folder)
+
+    # --------------------------------------------------------
+    # 4. Preparar estructura del NFS
+    # --------------------------------------------------------
+
+    modulo_folder = normalize_module_name(modulo)
+
+    now = datetime.now(timezone.utc)
+
+    year = now.strftime("%Y")
+    month = now.strftime("%m")
+
+    upload_directory = (
+        UPLOAD_BASE_PATH
+        / cliente_folder
+        / "activo"
+        / modulo_folder
+        / year
+        / month
+    )
+
+    # --------------------------------------------------------
+    # 5. Procesar archivos
+    # --------------------------------------------------------
+
+    uploaded_files = []
+    failed_files = []
+
+    async for db in get_db_session(client_id):
+
+        for index, upload_file in enumerate(archivos):
+
+            file_id = None
+            destination = None
+            db_inserted = False
+
+            try:
+
+                if not upload_file.filename:
+                    failed_files.append({
+                        "filename": None,
+                        "error": "Nombre de archivo inválido"
+                    })
+                    continue
+
+                original_filename = Path(
+                    upload_file.filename
+                ).name
+
+                file_extension = Path(
+                    original_filename
+                ).suffix.lower()
+
+                mime_type = (
+                    upload_file.content_type
+                    or "application/octet-stream"
+                )
+
+                # ------------------------------------------------
+                # Metadata individual del archivo
+                # ------------------------------------------------
+
+                file_description = (
+                    descripcion[index].strip()
+                    if index < len(descripcion)
+                    else ""
+                )
+
+                file_type = (
+                    tipo[index].strip()
+                    if index < len(tipo)
+                    else ""
+                )
+
+                file_expedition = (
+                    expedicion[index]
+                    if index < len(expedicion)
+                    else ""
+                )
+
+                file_publication = (
+                    fpublicacion[index]
+                    if index < len(fpublicacion)
+                    else ""
+                )
+
+                file_insurance = (
+                    seguro[index]
+                    if index < len(seguro)
+                    else "0"
+                )
+
+                expedition_timestamp = parse_expedition_date(
+                    file_expedition
+                )
+
+                publication_date = parse_publication_date(
+                    file_publication
+                )
+
+                insurance_value = (
+                    "1"
+                    if str(file_insurance).strip().lower()
+                    in {"1", "true", "si", "sí"}
+                    else "0"
+                )
+
+                # --------------------------------------------
+                # 5.1 Obtener consecutivo
+                # --------------------------------------------
+
+                file_id = await get_next_file_id()
+
+                # --------------------------------------------
+                # 5.2 Nombre físico
+                # --------------------------------------------
+
+                physical_filename = f"sxFile{file_id}"
+
+                if feedback and file_extension:
+                    physical_filename += file_extension
+
+                destination = (
+                    upload_directory
+                    / physical_filename
+                )
+
+                # --------------------------------------------
+                # 5.3 Guardar archivo físico
+                # --------------------------------------------
+
+                file_size = await save_upload_file(
+                    upload_file,
+                    destination
+                )
+
+                # --------------------------------------------
+                # 5.4 Insertar metadatos
+                # --------------------------------------------
+
+                current_timestamp = int(
+                    datetime.now(timezone.utc).timestamp()
+                )
+
+                await db.execute(
+                    text("""
+                        INSERT INTO tn_sx_files (
+                            id,
+                            modulo,
+                            opcion,
+                            idRel,
+                            nombre,
+                            descripcion,
+                            tipoDoc,
+                            fExpedicion,
+                            fPublicacion,
+                            tipoMime,
+                            size,
+                            fecha,
+                            estado,
+                            seguro,
+                            ordenamiento,
+                            cliente,
+                            is_gcs,
+                            gcs_unique_filename,
+                            gcs_url
+                        )
+                        VALUES (
+                            :id,
+                            :modulo,
+                            :opcion,
+                            :idRel,
+                            :nombre,
+                            :descripcion,
+                            :tipoDoc,
+                            :fExpedicion,
+                            :fPublicacion,
+                            :tipoMime,
+                            :size,
+                            :fecha,
+                            'A',
+                            :seguro,
+                            0,
+                            0,
+                            0,
+                            NULL,
+                            NULL
+                        )
+                    """),
+                    {
+                        "id": file_id,
+                        "modulo": modulo,
+                        "opcion": opcion,
+                        "idRel": idRel,
+                        "nombre": original_filename,
+                        "descripcion": file_description or None,
+                        "tipoDoc": file_type or None,
+                        "fExpedicion": expedition_timestamp,
+                        "fPublicacion": publication_date,
+                        "tipoMime": mime_type,
+                        "size": file_size,
+                        "fecha": current_timestamp,
+                        "seguro": insurance_value
+                    }
+                )
+
+                await db.commit()
+
+                db_inserted = True
+
+                uploaded_files.append({
+                    "id": file_id,
+                    "nombre": original_filename,
+                    "nombreFisico": physical_filename,
+                    "size": file_size,
+                    "tipoMime": mime_type,
+                    "modulo": modulo,
+                    "opcion": opcion,
+                    "idRel": idRel,
+                    "estado": "A"
+                })
+
+            except HTTPException as exc:
+
+                if destination and destination.exists():
+                    destination.unlink(missing_ok=True)
+
+                if db_inserted and file_id:
+                    await db.execute(
+                        text("""
+                            DELETE FROM tn_sx_files
+                            WHERE id = :id
+                        """),
+                        {"id": file_id}
+                    )
+                    await db.commit()
+
+                failed_files.append({
+                    "filename": upload_file.filename,
+                    "error": exc.detail
+                })
+
+            except Exception as exc:
+
+                await db.rollback()
+
+                if destination and destination.exists():
+                    destination.unlink(missing_ok=True)
+
+                if file_id:
+                    try:
+                        await db.execute(
+                            text("""
+                                DELETE FROM tn_sx_files
+                                WHERE id = :id
+                            """),
+                            {"id": file_id}
+                        )
+                        await db.commit()
+                    except Exception:
+                        await db.rollback()
+
+                logger.exception(
+                    "Error cargando archivo %s",
+                    upload_file.filename
+                )
+
+                failed_files.append({
+                    "filename": upload_file.filename,
+                    "error": "Error interno procesando el archivo"
+                })
+
+        break
+
+    # --------------------------------------------------------
+    # 6. Respuesta
+    # --------------------------------------------------------
+
+    return {
+        "success": len(uploaded_files) > 0,
+        "total": len(archivos),
+        "uploaded": len(uploaded_files),
+        "failed": len(failed_files),
+        "files": uploaded_files,
+        "errors": failed_files,
+        "lastId": (
+            uploaded_files[-1]["id"]
+            if uploaded_files
+            else None
+        )
+    }

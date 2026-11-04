@@ -37,6 +37,9 @@ RUN adduser \
     --uid 1999 \
     portal
 
+# Verificar UID y GID durante el build
+RUN id portal && getent passwd portal
+
 # Ejecutar el servicio como portal
 USER portal
 

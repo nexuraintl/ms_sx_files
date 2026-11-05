@@ -27,6 +27,7 @@ from typing import Optional
 from fastapi import File, Form, UploadFile
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
+from schemas import DownloadFileRequest
 
 logging.basicConfig(level=settings.LOG_LEVEL)
 logger = logging.getLogger("NFS-Service")
@@ -820,3 +821,219 @@ async def upload_files(
             else None
         )
     }
+
+@app.post("/download-file")
+async def download_file_by_id(
+    payload: DownloadFileRequest,
+    request: Request
+):
+    """
+    Descarga un archivo físico utilizando el ID de tn_sx_files.
+
+    No utiliza DescargaAuditoria.
+    """
+
+    file_id = payload.file_id
+    client_id = payload.client_id
+    token = payload.token
+
+    nfs_base_path = Path("/app/media")
+
+    # --------------------------------------------------------
+    # 1. Validar autenticación Google
+    # --------------------------------------------------------
+
+    AuthService.validar_access_token_google(
+        token,
+        client_id
+    )
+
+    # --------------------------------------------------------
+    # 2. Validar configuración de base de datos del cliente
+    # --------------------------------------------------------
+
+    engine_cliente = await get_engine_for_client(client_id)
+
+    if not engine_cliente:
+        raise HTTPException(
+            status_code=404,
+            detail="Configuración de cliente no encontrada."
+        )
+
+    # --------------------------------------------------------
+    # 3. Consultar archivo en tn_sx_files
+    # --------------------------------------------------------
+
+    registro = None
+
+    async for db in get_db_session(client_id):
+
+        result = await db.execute(
+            text("""
+                SELECT
+                    id,
+                    nombre,
+                    tipoMime,
+                    size,
+                    estado
+                FROM tn_sx_files
+                WHERE id = :file_id
+                LIMIT 1
+            """),
+            {
+                "file_id": file_id
+            }
+        )
+
+        registro = result.mappings().first()
+
+        break
+
+    if not registro:
+        raise HTTPException(
+            status_code=404,
+            detail="El registro del archivo no existe."
+        )
+
+    # --------------------------------------------------------
+    # 4. Validar estado del archivo
+    # --------------------------------------------------------
+
+    if registro["estado"] != "A":
+        raise HTTPException(
+            status_code=403,
+            detail="El archivo no está activo."
+        )
+
+    # --------------------------------------------------------
+    # 5. Construir ruta del archivo físico
+    # --------------------------------------------------------
+
+    original_filename = Path(
+        registro["nombre"]
+    ).name
+
+    file_extension = Path(
+        original_filename
+    ).suffix.lower()
+
+    physical_filename = f"sxFile{file_id}"
+
+    candidate_paths = [
+        nfs_base_path / f"{physical_filename}{file_extension}",
+        nfs_base_path / physical_filename
+    ]
+
+    full_path = next(
+        (
+            path
+            for path in candidate_paths
+            if path.is_file()
+        ),
+        None
+    )
+
+    if not full_path:
+        logger.error(
+            "Archivo físico no encontrado | file_id=%s | rutas=%s",
+            file_id,
+            candidate_paths
+        )
+
+        raise HTTPException(
+            status_code=404,
+            detail="El archivo físico no se encuentra en el servidor."
+        )
+
+    # --------------------------------------------------------
+    # 6. Preparar información de descarga
+    # --------------------------------------------------------
+
+    file_size = full_path.stat().st_size
+
+    mime_type = (
+        registro["tipoMime"]
+        or "application/octet-stream"
+    )
+
+    filename_encoded = quote(original_filename)
+
+    filename_ascii = original_filename.encode(
+        "ascii",
+        "ignore"
+    ).decode("ascii")
+
+    # --------------------------------------------------------
+    # 7. Stream del archivo
+    # --------------------------------------------------------
+
+    async def stream_wrapper():
+
+        bytes_sent = 0
+
+        try:
+
+            logger.info(
+                "Inicio descarga tn_sx_files | file_id=%s | size=%s",
+                file_id,
+                file_size
+            )
+
+            async for chunk in FileService.file_iterator(
+                str(full_path)
+            ):
+
+                if await request.is_disconnected():
+
+                    logger.warning(
+                        "Cliente desconectado | file_id=%s",
+                        file_id
+                    )
+
+                    break
+
+                bytes_sent += len(chunk)
+
+                yield chunk
+
+            logger.info(
+                "Stream finalizado | file_id=%s | bytes=%s/%s",
+                file_id,
+                bytes_sent,
+                file_size
+            )
+
+        except ClientDisconnect:
+
+            logger.info(
+                "Cliente desconectado durante descarga | file_id=%s",
+                file_id
+            )
+
+        except Exception:
+
+            logger.exception(
+                "Error transmitiendo archivo | file_id=%s",
+                file_id
+            )
+
+    # --------------------------------------------------------
+    # 8. Respuesta HTTP
+    # --------------------------------------------------------
+
+    return StreamingResponse(
+        stream_wrapper(),
+        media_type=mime_type,
+        headers={
+            "Content-Disposition": (
+                f'attachment; filename="{filename_ascii}"; '
+                f"filename*=UTF-8''{filename_encoded}"
+            ),
+            "Content-Length": str(file_size),
+            "X-Content-Type-Options": "nosniff",
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            "Pragma": "no-cache",
+            "Expires": "0",
+            "X-Accel-Buffering": "no"
+        }
+    )

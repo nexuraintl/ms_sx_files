@@ -18,3 +18,11 @@ class ClientDBConfig(BaseModel):
         # como de objetos de fila de SQLAlchemy
         from_attributes = True
         populate_by_name = True
+
+class DownloadFileRequest(BaseModel):
+    """
+    Datos requeridos para descargar un archivo de tn_sx_files.
+    """
+    file_id: int = Field(..., gt=0)
+    client_id: str = Field(..., min_length=1)
+    token: str = Field(..., min_length=1)

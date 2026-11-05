@@ -1386,7 +1386,7 @@ async def get_image_path(
 
     auth_service = AuthService()
 
-    is_valid_token = await auth_service.validate_token(
+    is_valid_token = auth_service.validate_token(
         token=token,
         client_id=client_id
     )

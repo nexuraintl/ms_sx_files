@@ -4,7 +4,7 @@ import os
 from datetime import datetime, timezone
 from urllib.parse import quote  # Necesario para codificar el nombre del archivo
 
-from fastapi import FastAPI, HTTPException, Request, BackgroundTasks
+from fastapi import FastAPI, HTTPException, Request, BackgroundTasks, Query
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession, AsyncEngine
 from sqlalchemy import select, update, text
@@ -1300,3 +1300,233 @@ async def upload_image(
             status_code=500,
             detail="Error interno cargando la imagen."
         ) from exc
+
+# Extensiones permitidas para imágenes
+ALLOWED_IMAGE_EXTENSIONS = {
+    ".jpg",
+    ".jpeg",
+    ".png",
+    ".gif",
+    ".webp",
+}
+
+# Directorio físico donde actualmente se almacenan las imágenes
+UPLOAD_BASE_PATH = Path("/app/media")
+
+
+def sanitize_path_component(value: str) -> str:
+    """
+    Sanitiza un componente de ruta para evitar caracteres no permitidos
+    y posibles ataques de path traversal.
+    """
+    if not value:
+        raise HTTPException(
+            status_code=400,
+            detail="El componente de ruta no puede estar vacío"
+        )
+
+    sanitized = re.sub(r"[^a-zA-Z0-9_-]", "", str(value))
+
+    if not sanitized:
+        raise HTTPException(
+            status_code=400,
+            detail="Componente de ruta inválido"
+        )
+
+    return sanitized
+
+
+def get_image_extension(filename: str) -> str:
+    """
+    Obtiene y valida la extensión del archivo.
+    """
+    extension = Path(filename).suffix.lower()
+
+    if extension not in ALLOWED_IMAGE_EXTENSIONS:
+        raise HTTPException(
+            status_code=400,
+            detail="Extensión de imagen no permitida"
+        )
+
+    return extension
+
+
+@router.get("/image-path/{file_id}")
+async def get_image_path(
+    file_id: int,
+    client_id: str = Query(...),
+    token: str = Query(...)
+):
+    """
+    Obtiene la ruta lógica de una imagen registrada en tn_sx_files.
+
+    Ruta lógica:
+    /info/{clienteFolder}/media/{modulo}/sxImgFile{id}.{extension}
+
+    Ejemplo:
+    /info/jcc/media/test/sxImgFile109924.png
+    """
+
+    # ---------------------------------------------------------
+    # 1. Validar identificador
+    # ---------------------------------------------------------
+
+    if file_id <= 0:
+        raise HTTPException(
+            status_code=400,
+            detail="El ID del archivo debe ser mayor que cero"
+        )
+
+    # ---------------------------------------------------------
+    # 2. Validar token
+    # ---------------------------------------------------------
+
+    # Utiliza aquí el mismo mecanismo de validación de token
+    # que tienes implementado en tu endpoint POST /upload-image.
+
+    auth_service = AuthService()
+
+    is_valid_token = await auth_service.validate_token(
+        token=token,
+        client_id=client_id
+    )
+
+    if not is_valid_token:
+        raise HTTPException(
+            status_code=401,
+            detail="Token inválido o expirado"
+        )
+
+    # ---------------------------------------------------------
+    # 3. Obtener conexión de la base de datos del cliente
+    # ---------------------------------------------------------
+
+    engine = await get_engine_for_client(client_id)
+
+    # ---------------------------------------------------------
+    # 4. Consultar registro de la imagen
+    # ---------------------------------------------------------
+
+    query = text("""
+        SELECT
+            id,
+            modulo,
+            nombre,
+            tipoMime,
+            estado
+        FROM tn_sx_files
+        WHERE id = :file_id
+        LIMIT 1
+    """)
+
+    async with engine.connect() as connection:
+
+        result = await connection.execute(
+            query,
+            {
+                "file_id": file_id
+            }
+        )
+
+        registro = result.mappings().first()
+
+    if not registro:
+        raise HTTPException(
+            status_code=404,
+            detail="La imagen no se encuentra registrada"
+        )
+
+    # ---------------------------------------------------------
+    # 5. Validar estado del archivo
+    # ---------------------------------------------------------
+
+    if str(registro["estado"]) != "1":
+        raise HTTPException(
+            status_code=404,
+            detail="La imagen no se encuentra activa"
+        )
+
+    # ---------------------------------------------------------
+    # 6. Validar que el archivo sea una imagen
+    # ---------------------------------------------------------
+
+    mime_type = registro["tipoMime"]
+
+    if not mime_type or not mime_type.startswith("image/"):
+        raise HTTPException(
+            status_code=400,
+            detail="El archivo registrado no corresponde a una imagen"
+        )
+
+    # ---------------------------------------------------------
+    # 7. Obtener extensión del archivo
+    # ---------------------------------------------------------
+
+    original_filename = registro["nombre"]
+
+    if not original_filename:
+        raise HTTPException(
+            status_code=400,
+            detail="El registro no contiene el nombre del archivo"
+        )
+
+    extension = get_image_extension(original_filename)
+
+    # ---------------------------------------------------------
+    # 8. Obtener carpeta del cliente
+    # ---------------------------------------------------------
+
+    cliente_folder = await get_client_folder(client_id)
+
+    if not cliente_folder:
+        raise HTTPException(
+            status_code=404,
+            detail="No se encontró la carpeta del cliente"
+        )
+
+    cliente_folder = sanitize_path_component(cliente_folder)
+
+    # ---------------------------------------------------------
+    # 9. Obtener módulo
+    # ---------------------------------------------------------
+
+    modulo = registro["modulo"]
+
+    if not modulo:
+        raise HTTPException(
+            status_code=400,
+            detail="El registro no tiene un módulo asociado"
+        )
+
+    modulo_folder = sanitize_path_component(modulo)
+
+    # ---------------------------------------------------------
+    # 10. Construir nombre físico
+    # ---------------------------------------------------------
+
+    physical_filename = f"sxImgFile{file_id}{extension}"
+
+    # ---------------------------------------------------------
+    # 11. Construir ruta lógica
+    # ---------------------------------------------------------
+
+    image_path = (
+        f"/info/"
+        f"{cliente_folder}/"
+        f"media/"
+        f"{modulo_folder}/"
+        f"{physical_filename}"
+    )
+
+    # ---------------------------------------------------------
+    # 12. Respuesta
+    # ---------------------------------------------------------
+
+    return {
+        "success": True,
+        "id": file_id,
+        "nombre": original_filename,
+        "nombreFisico": physical_filename,
+        "ruta": image_path,
+        "tipoMime": mime_type
+    }

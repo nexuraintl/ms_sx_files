@@ -1367,6 +1367,15 @@ async def get_image_path(
     /info/jcc/media/test/sxImgFile109924.png
     """
 
+    # --------------------------------------------------------
+    # 1. Validar autenticación Google
+    # --------------------------------------------------------
+
+    AuthService.validar_access_token_google(
+        token,
+        client_id
+    )
+
     # ---------------------------------------------------------
     # 1. Validar identificador
     # ---------------------------------------------------------
@@ -1375,26 +1384,6 @@ async def get_image_path(
         raise HTTPException(
             status_code=400,
             detail="El ID del archivo debe ser mayor que cero"
-        )
-
-    # ---------------------------------------------------------
-    # 2. Validar token
-    # ---------------------------------------------------------
-
-    # Utiliza aquí el mismo mecanismo de validación de token
-    # que tienes implementado en tu endpoint POST /upload-image.
-
-    auth_service = AuthService()
-
-    is_valid_token = auth_service.validate_token(
-        token=token,
-        client_id=client_id
-    )
-
-    if not is_valid_token:
-        raise HTTPException(
-            status_code=401,
-            detail="Token inválido o expirado"
         )
 
     # ---------------------------------------------------------

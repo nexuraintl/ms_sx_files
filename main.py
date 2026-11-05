@@ -1425,15 +1425,6 @@ async def get_image_path(
             detail="La imagen no se encuentra registrada"
         )
 
-    # ---------------------------------------------------------
-    # 5. Validar estado del archivo
-    # ---------------------------------------------------------
-
-    if str(registro["estado"]) != "1":
-        raise HTTPException(
-            status_code=404,
-            detail="La imagen no se encuentra activa"
-        )
 
     # ---------------------------------------------------------
     # 6. Validar que el archivo sea una imagen

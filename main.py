@@ -32,7 +32,10 @@ from schemas import DownloadFileRequest
 logging.basicConfig(level=settings.LOG_LEVEL)
 logger = logging.getLogger("NFS-Service")
 
-app = FastAPI(title=settings.APP_TITLE)
+app = FastAPI(
+    title=settings.APP_TITLE,
+    root_path="/services/sx/files"
+)
 
 # @app.on_event("startup")
 # async def startup_event():

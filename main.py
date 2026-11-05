@@ -1351,7 +1351,7 @@ def get_image_extension(filename: str) -> str:
     return extension
 
 
-@router.get("/image-path/{file_id}")
+@app.get("/image-path/{file_id}")
 async def get_image_path(
     file_id: int,
     client_id: str = Query(...),

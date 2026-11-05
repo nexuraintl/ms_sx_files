@@ -1037,3 +1037,266 @@ async def download_file_by_id(
             "X-Accel-Buffering": "no"
         }
     )
+
+
+# ============================================================
+# UPLOAD IMAGES
+# ============================================================
+
+ALLOWED_IMAGE_TYPES = {
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".png": "image/png",
+    ".gif": "image/gif",
+    ".webp": "image/webp",
+}
+
+
+@app.post("/upload-image")
+async def upload_image(
+    request: Request,
+    modulo: str = Form(...),
+    opcion: str = Form(...),
+    idRel: int = Form(...),
+    archivo: UploadFile = File(...),
+    descripcion: str = Form(default=""),
+    tipo: str = Form(default=""),
+    expedicion: str = Form(default=""),
+    fpublicacion: str = Form(default=""),
+    seguro: str = Form(default="0"),
+    client_id: str = Form(...),
+    token: str = Form(...)
+):
+    """
+    Carga una imagen en NFS y registra sus metadatos
+    en tn_sx_files.
+    
+    Nombre físico: sxImgFile{id}.extension
+    """
+
+    # --------------------------------------------------------
+    # 1. Autenticación
+    # --------------------------------------------------------
+
+    AuthService.validar_access_token_google(
+        token,
+        client_id
+    )
+
+    # --------------------------------------------------------
+    # 2. Validación del archivo
+    # --------------------------------------------------------
+
+    if not archivo.filename:
+        raise HTTPException(
+            status_code=400,
+            detail="Nombre de imagen inválido."
+        )
+
+    original_filename = Path(archivo.filename).name
+
+    file_extension = Path(
+        original_filename
+    ).suffix.lower()
+
+    mime_type = (
+        archivo.content_type
+        or "application/octet-stream"
+    ).lower()
+
+    if file_extension not in ALLOWED_IMAGE_TYPES:
+        raise HTTPException(
+            status_code=415,
+            detail="Formato de imagen no permitido. "
+                   "Se permiten JPG, JPEG, PNG, GIF y WEBP."
+        )
+
+    expected_mime = ALLOWED_IMAGE_TYPES[file_extension]
+
+    if mime_type != expected_mime:
+        raise HTTPException(
+            status_code=415,
+            detail="La extensión y el MIME de la imagen no coinciden."
+        )
+
+    # --------------------------------------------------------
+    # 3. Obtener base de datos del cliente
+    # --------------------------------------------------------
+
+    client_engine = await get_engine_for_client(client_id)
+
+    if not client_engine:
+        raise HTTPException(
+            status_code=404,
+            detail="Configuración de cliente no encontrada."
+        )
+
+    # --------------------------------------------------------
+    # 4. Preparar metadata
+    # --------------------------------------------------------
+
+    expedition_timestamp = parse_expedition_date(expedicion)
+
+    publication_date = parse_publication_date(fpublicacion)
+
+    insurance_value = (
+        "1"
+        if str(seguro).strip().lower()
+        in {"1", "true", "si", "sí"}
+        else "0"
+    )
+
+    file_id = None
+    destination = None
+
+    try:
+
+        # ----------------------------------------------------
+        # 5. Generar consecutivo
+        # ----------------------------------------------------
+
+        file_id = await get_next_file_id(client_engine)
+
+        # ----------------------------------------------------
+        # 6. Construir nombre físico de imagen
+        # ----------------------------------------------------
+
+        physical_filename = (
+            f"sxImgFile{file_id}{file_extension}"
+        )
+
+        destination = (
+            UPLOAD_BASE_PATH
+            / physical_filename
+        )
+
+        # ----------------------------------------------------
+        # 7. Guardar imagen en NFS
+        # ----------------------------------------------------
+
+        file_size = await save_upload_file(
+            archivo,
+            destination
+        )
+
+        # ----------------------------------------------------
+        # 8. Registrar metadata en tn_sx_files
+        # ----------------------------------------------------
+
+        current_timestamp = int(
+            datetime.now(timezone.utc).timestamp()
+        )
+
+        async for db in get_db_session(client_id):
+
+            await db.execute(
+                text("""
+                    INSERT INTO tn_sx_files (
+                        id,
+                        modulo,
+                        opcion,
+                        idRel,
+                        nombre,
+                        descripcion,
+                        tipoDoc,
+                        fExpedicion,
+                        fPublicacion,
+                        tipoMime,
+                        size,
+                        fecha,
+                        estado,
+                        seguro,
+                        ordenamiento,
+                        cliente,
+                        is_gcs,
+                        gcs_unique_filename,
+                        gcs_url
+                    )
+                    VALUES (
+                        :id,
+                        :modulo,
+                        :opcion,
+                        :idRel,
+                        :nombre,
+                        :descripcion,
+                        :tipoDoc,
+                        :fExpedicion,
+                        :fPublicacion,
+                        :tipoMime,
+                        :size,
+                        :fecha,
+                        'A',
+                        :seguro,
+                        0,
+                        0,
+                        0,
+                        NULL,
+                        NULL
+                    )
+                """),
+                {
+                    "id": file_id,
+                    "modulo": modulo,
+                    "opcion": opcion,
+                    "idRel": idRel,
+                    "nombre": original_filename,
+                    "descripcion": descripcion.strip() or None,
+                    "tipoDoc": tipo.strip() or None,
+                    "fExpedicion": expedition_timestamp,
+                    "fPublicacion": publication_date,
+                    "tipoMime": mime_type,
+                    "size": file_size,
+                    "fecha": current_timestamp,
+                    "seguro": insurance_value
+                }
+            )
+
+            await db.commit()
+
+            break
+
+        # ----------------------------------------------------
+        # 9. Respuesta
+        # ----------------------------------------------------
+
+        logger.info(
+            "IMAGE UPLOAD SUCCESS | file_id=%s | path=%s",
+            file_id,
+            destination
+        )
+
+        return {
+            "success": True,
+            "id": file_id,
+            "nombre": original_filename,
+            "nombreFisico": physical_filename,
+            "ruta": str(destination),
+            "size": file_size,
+            "tipoMime": mime_type,
+            "modulo": modulo,
+            "opcion": opcion,
+            "idRel": idRel,
+            "estado": "A"
+        }
+
+    except HTTPException:
+        if destination and destination.exists():
+            destination.unlink(missing_ok=True)
+
+        raise
+
+    except Exception as exc:
+
+        logger.exception(
+            "IMAGE UPLOAD ERROR | file_id=%s | error=%s",
+            file_id,
+            str(exc)
+        )
+
+        if destination and destination.exists():
+            destination.unlink(missing_ok=True)
+
+        raise HTTPException(
+            status_code=500,
+            detail="Error interno cargando la imagen."
+        ) from exc
